@@ -1,3 +1,8 @@
+.env
+*.env.local
+*.env.development
+*.env.production
+
 GITHUB_TOKEN
 GITHUB_TOKEN.txt
 *API*
