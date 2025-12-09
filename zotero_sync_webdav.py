@@ -12,13 +12,17 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
+from urllib.parse import unquote
 from pyzotero import zotero
 from tqdm import tqdm
 
-DEFAULT_ENV_FILE = os.environ.get("ZOTERO_ENV_FILE", ".env")
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+env_file_from_env = os.environ.get("ZOTERO_ENV_FILE")
+DEFAULT_ENV_FILE = Path(env_file_from_env) if env_file_from_env else SCRIPT_DIR / ".env"
 
 
-def load_env_file(env_path: str) -> None:
+def load_env_file(env_path: os.PathLike[str] | str) -> None:
     """Carrega variáveis de ambiente a partir de um arquivo .env simples."""
     if not env_path:
         return
@@ -48,12 +52,12 @@ API_KEY = os.environ.get("ZOTERO_API_KEY")
 
 # Caminho padrão para a pasta que contém os arquivos PDF.
 # Pode ser sobrescrito via variável de ambiente ZOTERO_SYNC_TARGET_FOLDER.
-TARGET_FOLDER = os.environ.get("ZOTERO_SYNC_TARGET_FOLDER")
+TARGET_FOLDER_RAW = os.environ.get("ZOTERO_SYNC_TARGET_FOLDER")
 
 missing_env = [name for name, value in {
     "ZOTERO_LIBRARY_ID": LIBRARY_ID,
     "ZOTERO_API_KEY": API_KEY,
-    "ZOTERO_SYNC_TARGET_FOLDER": TARGET_FOLDER,
+    "ZOTERO_SYNC_TARGET_FOLDER": TARGET_FOLDER_RAW,
 }.items() if not value]
 
 if missing_env:
@@ -61,6 +65,28 @@ if missing_env:
         f"Defina as variáveis de ambiente obrigatórias ({', '.join(missing_env)}). "
         "Use um arquivo .env na raiz do projeto ou exporte-as antes de executar."
     )
+
+
+def resolve_target_folder(raw_path: str) -> str:
+    """Resolve o caminho da pasta alvo, tentando decodificar espaços/percent-encoding."""
+    expanded = os.path.expanduser(raw_path)
+    candidates = [expanded]
+
+    if "%" in expanded:
+        decoded_uri = unquote(expanded)
+        if decoded_uri not in candidates:
+            candidates.append(decoded_uri)
+        decoded_spaces = expanded.replace("%20", " ")
+        if decoded_spaces not in candidates:
+            candidates.append(decoded_spaces)
+
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+    return expanded
+
+
+TARGET_FOLDER = resolve_target_folder(TARGET_FOLDER_RAW)
 
 # Pasta onde será criada a cópia local quando um novo anexo for enviado ao Zotero.
 # Por padrão utiliza ~/Zotero/storage para acompanhar a estrutura padrão do Zotero.
@@ -245,7 +271,10 @@ def finalize_execution(stats: dict, summary_text: str | None = None) -> None:
 
     send_completion_notification(stats, LOG_FILE_PATH)
 
-logging.info("Pasta alvo configurada: %s", TARGET_FOLDER)
+if TARGET_FOLDER_RAW != TARGET_FOLDER:
+    logging.info("Pasta alvo configurada: %s (valor original: %s)", TARGET_FOLDER, TARGET_FOLDER_RAW)
+else:
+    logging.info("Pasta alvo configurada: %s", TARGET_FOLDER)
 logging.info("Biblioteca Zotero configurada: %s (%s)", LIBRARY_ID, LIBRARY_TYPE)
 
 # --- Funções de Normalização ---
