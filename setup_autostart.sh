@@ -561,6 +561,22 @@ EOF
 create_webdav_service() {
   local service_path="$1"
   local helper_path="$2"
+  local wait_net="$(dirname "$helper_path")/wait_network.sh"
+
+  cat >"$wait_net" <<'WAITEOF'
+#!/usr/bin/env bash
+source "$HOME/.config/zotero_sync_webdav/zotero_sync.env"
+i=0
+while [ $i -lt 30 ]; do
+    ping -c1 -W2 "$ZSW_HOST" >/dev/null 2>&1 && exit 0
+    sleep 2
+    i=$((i+1))
+done
+echo "Timeout: host $ZSW_HOST nao respondeu." >&2
+exit 1
+WAITEOF
+  chmod 755 "$wait_net"
+
   cat <<EOF >"$service_path"
 [Unit]
 Description=Montar WebDAV (gio)
@@ -571,8 +587,8 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=%h/.config/zotero_sync_webdav/zotero_sync.env
+ExecStartPre=$wait_net
 ExecStart=$helper_path start
-ExecStartPre=/usr/bin/sleep 5
 ExecStop=$helper_path stop
 
 [Install]
@@ -584,6 +600,22 @@ create_sync_service() {
   local service_path="$1"
   local python_bin="$2"
   local python_script="$3"
+  local wait_folder="$(dirname "$python_script")/wait_webdav.sh"
+
+  cat >"$wait_folder" <<'WAITEOF'
+#!/usr/bin/env bash
+source "$HOME/.config/zotero_sync_webdav/zotero_sync.env"
+i=0
+while [ $i -lt 20 ]; do
+    test -d "$ZSW_TARGET_FOLDER" && exit 0
+    sleep 3
+    i=$((i+1))
+done
+echo "Timeout: pasta WebDAV nao ficou disponivel." >&2
+exit 1
+WAITEOF
+  chmod 755 "$wait_folder"
+
   cat <<EOF >"$service_path"
 [Unit]
 Description=Zotero WebDAV Sync (Python)
@@ -591,12 +623,11 @@ After=webdav-koofr.service
 Requires=webdav-koofr.service
 
 [Service]
-Type=simple
+Type=oneshot
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=%h/.config/zotero_sync_webdav/zotero_sync.env
+ExecStartPre=$wait_folder
 ExecStart=$python_bin $python_script
-Restart=on-failure
-RestartSec=10
 
 [Install]
 WantedBy=default.target

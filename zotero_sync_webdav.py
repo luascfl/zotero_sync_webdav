@@ -50,8 +50,6 @@ LIBRARY_ID = os.environ.get("ZOTERO_LIBRARY_ID")
 LIBRARY_TYPE = os.environ.get("ZOTERO_LIBRARY_TYPE", "user")
 API_KEY = os.environ.get("ZOTERO_API_KEY")
 
-# Caminho padrão para a pasta que contém os arquivos PDF.
-# Pode ser sobrescrito via variável de ambiente ZOTERO_SYNC_TARGET_FOLDER.
 TARGET_FOLDER_RAW = os.environ.get("ZOTERO_SYNC_TARGET_FOLDER")
 
 missing_env = [name for name, value in {
@@ -89,7 +87,6 @@ def resolve_target_folder(raw_path: str) -> str:
 TARGET_FOLDER = resolve_target_folder(TARGET_FOLDER_RAW)
 
 # Pasta onde será criada a cópia local quando um novo anexo for enviado ao Zotero.
-# Por padrão utiliza ~/Zotero/storage para acompanhar a estrutura padrão do Zotero.
 LOCAL_COPY_DIR = os.path.join(os.path.expanduser("~"), "Zotero", "storage")
 
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "zotero_sync_webdav")
@@ -108,15 +105,16 @@ LOG_DESKTOP_FILE = os.path.join(
     f"{LOG_DESKTOP_ID}.desktop",
 )
 
-CACHE_VERSION = 1
-
 HASH_CACHE: Dict[str, dict] = {}
 
-# Limite de arquivos mais recentes a serem verificados na pasta
-MAX_FILES_TO_CHECK = 50
-MAX_ATTACHMENTS_TO_CHECK = 50
+# FIX: Limites aumentados para cobrir bibliotecas grandes.
+# 0 = sem limite (processa tudo).
+MAX_FILES_TO_CHECK = 0        # 0 = todos os PDFs da pasta
+MAX_ATTACHMENTS_TO_CHECK = 0  # 0 = todos os anexos do Zotero
+
 # Ativar logs detalhados no console
 DEBUG_DETAILED = True
+
 
 def prepare_daily_log_file() -> str | None:
     """Garante um log diário único e retorna o caminho."""
@@ -162,7 +160,6 @@ if LOG_FILE_PATH:
     except OSError as exc:
         print(f"[LOG] Não foi possível anexar handler de arquivo: {exc}")
 
-# Configuração do logging
 logging.basicConfig(
     level=logging.DEBUG if DEBUG_DETAILED else logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -229,26 +226,13 @@ def send_completion_notification(stats: dict, log_path: str | None) -> None:
     if log_path:
         body += "\nClique para abrir o log de hoje."
 
-    cmd = [
-        "notify-send",
-        "-a",
-        "Zotero Sync",
-        "-i",
-        "text-x-log",
-    ]
+    cmd = ["notify-send", "-a", "Zotero Sync", "-i", "text-x-log"]
 
     desktop_hint = ensure_log_desktop_entry(log_path) if log_path else None
     if desktop_hint:
         cmd.extend(["-h", f"string:desktop-entry:{desktop_hint}"])
-    else:
-        logging.debug("[NOTIFY] Desktop entry indisponível; o clique pode não abrir o log.")
 
-    cmd.extend(
-        [
-            "Sincronização Zotero/WebDAV concluída",
-            body,
-        ]
-    )
+    cmd.extend(["Sincronização Zotero/WebDAV concluída", body])
 
     try:
         subprocess.run(cmd, check=False)
@@ -271,11 +255,13 @@ def finalize_execution(stats: dict, summary_text: str | None = None) -> None:
 
     send_completion_notification(stats, LOG_FILE_PATH)
 
+
 if TARGET_FOLDER_RAW != TARGET_FOLDER:
     logging.info("Pasta alvo configurada: %s (valor original: %s)", TARGET_FOLDER, TARGET_FOLDER_RAW)
 else:
     logging.info("Pasta alvo configurada: %s", TARGET_FOLDER)
 logging.info("Biblioteca Zotero configurada: %s (%s)", LIBRARY_ID, LIBRARY_TYPE)
+
 
 # --- Funções de Normalização ---
 
@@ -288,6 +274,7 @@ def normalize_filename(fname: str) -> str:
     except Exception as e:
         logging.warning(f"Erro ao normalizar '{fname}': {e}")
         return ""
+
 
 def normalize_aggressive(fname: str) -> str:
     """Normalização agressiva: remove acentos, caracteres especiais e espaços extras."""
@@ -304,6 +291,7 @@ def normalize_aggressive(fname: str) -> str:
         logging.warning(f"Erro na normalização agressiva de '{fname}': {e}")
         return ""
 
+
 def get_filename_from_item(item: dict) -> str:
     """Extrai o nome do arquivo de um item de anexo da Pyzotero."""
     data = item.get('data', {})
@@ -314,7 +302,6 @@ def get_filename_from_item(item: dict) -> str:
     if path:
         try:
             path_str = str(path)
-            # Remover prefixos comuns de URI ou placeholders
             if path_str.startswith("file:///"):
                 path_str = path_str[8:]
             elif path_str.startswith("file://"):
@@ -322,9 +309,7 @@ def get_filename_from_item(item: dict) -> str:
             elif path_str.startswith("file:"):
                 path_str = path_str[5:]
             elif path_str.startswith("storage:"):
-                # Em linked files, "storage:" indica pastas dentro do storage local
                 path_str = path_str.split(":", 1)[-1]
-
             path_str = path_str.replace("\\", "/")
             return os.path.basename(path_str)
         except Exception:
@@ -343,15 +328,12 @@ def parse_zotero_date(date_str: str) -> datetime | None:
         logging.warning("[ZOT] Data inválida recebida: %s", date_str)
         return None
 
-def collect_recent_pdfs(directory: str, limit: int, stats: dict) -> List[str]:
-    """Retorna os PDFs mais recentes, limitando o processamento aos "top N" por data."""
-    logging.info("[SCAN] Iniciando varredura de PDFs em %s", directory)
-    if limit <= 0:
-        logging.warning("[SCAN] Limite de arquivos a verificar é %d. Nada será processado.", limit)
-        return []
 
-    recent_heap: List[Tuple[float, str]] = []
-    total_pdfs = 0
+def collect_all_pdfs(directory: str, stats: dict) -> List[str]:
+    """Retorna todos os PDFs da pasta, ordenados do mais recente ao mais antigo."""
+    logging.info("[SCAN] Iniciando varredura de PDFs em %s", directory)
+
+    entries: List[Tuple[float, str]] = []
 
     try:
         with os.scandir(directory) as it:
@@ -360,17 +342,12 @@ def collect_recent_pdfs(directory: str, limit: int, stats: dict) -> List[str]:
                     continue
                 if not entry.name.lower().endswith('.pdf'):
                     continue
-
                 try:
                     mtime = entry.stat().st_mtime
                 except OSError as exc:
                     logging.warning("[SCAN] Não foi possível ler mtime de '%s': %s", entry.path, exc)
                     continue
-
-                total_pdfs += 1
-                heapq.heappush(recent_heap, (mtime, entry.path))
-                if len(recent_heap) > limit:
-                    heapq.heappop(recent_heap)
+                entries.append((mtime, entry.path))
 
     except FileNotFoundError:
         logging.error("A pasta alvo não foi encontrada: %s", directory)
@@ -382,50 +359,43 @@ def collect_recent_pdfs(directory: str, limit: int, stats: dict) -> List[str]:
         logging.error("Erro ao varrer a pasta '%s': %s", directory, exc)
         return []
 
-    if not recent_heap:
+    if not entries:
         logging.info("[SCAN] Nenhum PDF encontrado em %s.", directory)
         return []
 
-    recent_heap.sort(key=lambda item: item[0], reverse=True)
+    entries.sort(key=lambda x: x[0], reverse=True)
 
-    stats['folder_total_pdfs'] = total_pdfs
-    stats['folder_checked_pdfs'] = len(recent_heap)
+    stats['folder_total_pdfs'] = len(entries)
+    stats['folder_checked_pdfs'] = len(entries)
 
-    if total_pdfs > limit:
-        logging.info(
-            "[SCAN] PDFs contabilizados: %d | Selecionados (top %d): %d",
-            total_pdfs,
-            limit,
-            stats['folder_checked_pdfs'],
-        )
-    else:
-        logging.info(
-            "[SCAN] PDFs contabilizados: %d | Selecionados: %d",
-            total_pdfs,
-            stats['folder_checked_pdfs'],
-        )
+    logging.info("[SCAN] PDFs encontrados: %d", len(entries))
 
-    if DEBUG_DETAILED and recent_heap:
-        logging.debug("[SCAN] Primeiro selecionado: %s", recent_heap[0][1])
-        if len(recent_heap) > 1:
-            logging.debug("[SCAN] Último selecionado: %s", recent_heap[-1][1])
+    return [path for _, path in entries]
 
-    return [path for _, path in recent_heap]
 
-def collect_recent_attachments(
+def collect_all_attachments(
     zot: zotero.Zotero,
-    limit: int,
     stats: dict,
 ) -> Tuple[List[dict], dict, dict]:
-    """Busca todos os anexos, indexa nomes normalizados e retorna os mais recentes por dateAdded."""
+    """
+    Busca TODOS os anexos da biblioteca sem limite de janela.
+
+    FIX: A versão anterior limitava a janela de "recentes" a MAX_ATTACHMENTS_TO_CHECK,
+    o que fazia o índice de nomes ficar incompleto — anexos antigos eram ignorados
+    na comparação, causando duplicatas ao re-adicionar o mesmo arquivo.
+
+    Agora:
+    - existing_filenames / existing_filenames_aggressive indexam TODOS os anexos.
+    - A lista retornada também é a lista completa (usada apenas para logging/debug).
+    """
     page_size = 100
     start = 0
     total = 0
-    recent_heap: List[Tuple[float, dict]] = []
+    all_items: List[dict] = []
     existing_filenames: dict = {}
     existing_filenames_aggressive: dict = {}
 
-    logging.info("[ZOT] Iniciando varredura de anexos com janela top %d.", limit)
+    logging.info("[ZOT] Iniciando varredura completa de anexos (sem limite).")
 
     while True:
         try:
@@ -444,29 +414,27 @@ def collect_recent_attachments(
             break
 
         total += len(items)
-        logging.debug("[ZOT] Página de anexos recebida. start=%d | itens=%d", start, len(items))
+        logging.debug("[ZOT] Página recebida. start=%d | itens=%d | total=%d", start, len(items), total)
 
         for item in items:
             data = item.get('data', {})
             date_added = parse_zotero_date(data.get('dateAdded'))
-            if not date_added:
-                continue
-            timestamp = date_added.timestamp()
-            item['_parsed_date_added'] = date_added
-            item['_timestamp'] = timestamp
-            heapq.heappush(recent_heap, (timestamp, item))
-            if len(recent_heap) > limit:
-                heapq.heappop(recent_heap)
+            if date_added:
+                item['_parsed_date_added'] = date_added
+                item['_timestamp'] = date_added.timestamp()
 
             filename = get_filename_from_item(item)
             if filename:
                 info = {'original': filename, 'key': item['key']}
                 norm_file = normalize_filename(filename)
                 norm_agg_file = normalize_aggressive(filename)
+                # Guarda o primeiro encontrado (mais recente, pois ordenamos desc)
                 if norm_file and norm_file not in existing_filenames:
                     existing_filenames[norm_file] = info
                 if norm_agg_file and norm_agg_file not in existing_filenames_aggressive:
                     existing_filenames_aggressive[norm_agg_file] = info
+
+            all_items.append(item)
 
         if len(items) < page_size:
             break
@@ -474,39 +442,16 @@ def collect_recent_attachments(
 
     stats['zotero_attachments_scanned'] = total
 
-    if not recent_heap:
-        logging.warning("[ZOT] Nenhum anexo válido encontrado.")
-        return []
-
-    recent_heap.sort(key=lambda entry: entry[0], reverse=True)
-    selected_items = [item for _, item in recent_heap]
-
     logging.info(
-        "[ZOT] Varredura concluída. Total escaneado: %d | Selecionados (top %d): %d",
+        "[ZOT] Varredura concluída. Total: %d anexos | Nomes únicos (basic): %d | (aggressive): %d",
         total,
-        limit,
-            len(selected_items),
+        len(existing_filenames),
+        len(existing_filenames_aggressive),
     )
 
-    if DEBUG_DETAILED and selected_items:
-        first = selected_items[0]
-        last = selected_items[-1]
-        logging.debug(
-            "[ZOT] Top mais recente: dateAdded=%s | título=%s | filename=%s | key=%s",
-            first.get('_parsed_date_added') or first.get('data', {}).get('dateAdded'),
-            first.get('data', {}).get('title'),
-            first.get('data', {}).get('filename') or first.get('data', {}).get('path'),
-            first.get('key'),
-        )
-        logging.debug(
-            "[ZOT] Top limite: dateAdded=%s | título=%s | filename=%s | key=%s",
-            last.get('_parsed_date_added') or last.get('data', {}).get('dateAdded'),
-            last.get('data', {}).get('title'),
-            last.get('data', {}).get('filename') or last.get('data', {}).get('path'),
-            last.get('key'),
-        )
+    # FIX: retorna tupla consistente mesmo quando vazio (bug anterior retornava [] sozinho)
+    return all_items, existing_filenames, existing_filenames_aggressive
 
-    return selected_items, existing_filenames, existing_filenames_aggressive
 
 def _coerce_response_items(items):
     """Normaliza estruturas retornadas pela Pyzotero em listas de anexos."""
@@ -518,8 +463,10 @@ def _coerce_response_items(items):
         return items
     return [items]
 
+
 def _normalize_cache_path(path: str) -> str:
     return os.path.abspath(path)
+
 
 def load_hash_cache() -> Dict[str, dict]:
     """Carrega o cache de hashes persistido em disco."""
@@ -541,6 +488,7 @@ def load_hash_cache() -> Dict[str, dict]:
         return {}
     return entries
 
+
 def save_hash_cache(cache: Dict[str, dict]) -> None:
     """Persiste o cache de hashes em disco."""
     try:
@@ -554,6 +502,7 @@ def save_hash_cache(cache: Dict[str, dict]) -> None:
             json.dump(payload, fh, ensure_ascii=True, indent=2)
     except Exception as exc:
         logging.warning("[CACHE] Falha ao salvar cache: %s", exc)
+
 
 def get_cached_hash(path: str, cache: Dict[str, dict], stat_result: os.stat_result | None = None) -> str | None:
     """Recupera um hash do cache se mtime e tamanho coincidirem."""
@@ -585,6 +534,7 @@ def get_cached_hash(path: str, cache: Dict[str, dict], stat_result: os.stat_resu
 
     return entry.get("hash")
 
+
 def set_cached_hash(path: str, file_hash: str, cache: Dict[str, dict], stat_result: os.stat_result | None = None) -> None:
     """Armazena no cache o hash calculado para um arquivo."""
     abspath = _normalize_cache_path(path)
@@ -603,6 +553,7 @@ def set_cached_hash(path: str, file_hash: str, cache: Dict[str, dict], stat_resu
         entry["mtime"] = stat.st_mtime
     cache[abspath] = entry
 
+
 def rename_cache_entry(cache: Dict[str, dict], old_path: str, new_path: str) -> None:
     """Atualiza o cache quando um arquivo é renomeado."""
     old_abs = _normalize_cache_path(old_path)
@@ -612,6 +563,7 @@ def rename_cache_entry(cache: Dict[str, dict], old_path: str, new_path: str) -> 
     entry = cache.pop(old_abs, None)
     if entry:
         cache[new_abs] = entry
+
 
 def compute_sha256(path: str, cache: Dict[str, dict] | None = None) -> str | None:
     """Calcula o hash SHA-256 do arquivo fornecido com suporte a cache."""
@@ -642,8 +594,10 @@ def compute_sha256(path: str, cache: Dict[str, dict] | None = None) -> str | Non
         set_cached_hash(abspath, file_hash, cache_ref, stat)
     return file_hash
 
+
 HASH_CACHE.update(load_hash_cache())
 atexit.register(save_hash_cache, HASH_CACHE)
+
 
 def get_latest_pdf_path(directory: str) -> str | None:
     """Retorna o PDF mais recente dentro de um diretório."""
@@ -664,6 +618,7 @@ def get_latest_pdf_path(directory: str) -> str | None:
 
     candidates.sort(key=lambda path: os.path.getmtime(path), reverse=True)
     return candidates[0]
+
 
 def build_local_storage_index(existing_filenames: Dict[str, dict]) -> Tuple[Dict[str, List[dict]], Dict[str, str]]:
     """Indexa os anexos locais já sincronizados por SHA-256."""
@@ -698,6 +653,7 @@ def build_local_storage_index(existing_filenames: Dict[str, dict]) -> Tuple[Dict
 
     return hash_index, key_to_path
 
+
 def rename_webdav_file(src_path: str, desired_name: str) -> str:
     """Renomeia o arquivo no WebDAV para alinhar com o Zotero."""
     current_name = os.path.basename(src_path)
@@ -727,6 +683,7 @@ def rename_webdav_file(src_path: str, desired_name: str) -> str:
         )
         return src_path
 
+
 def register_local_hash(
     hash_index: Dict[str, List[dict]],
     key_to_path: Dict[str, str],
@@ -750,6 +707,7 @@ def register_local_hash(
     if not any(existing['key'] == key for existing in bucket):
         bucket.append(entry)
     key_to_path[key] = file_path
+
 
 def rename_local_attachment(
     zot: zotero.Zotero,
@@ -797,7 +755,6 @@ def rename_local_attachment(
     try:
         item_data = item.get('data', {})
         item_data['filename'] = new_filename
-        # Atualizar título apenas se estiver vazio ou igual ao nome anterior
         if not item_data.get('title') or item_data['title'] == current_name:
             item_data['title'] = new_filename
         item['data'] = item_data
@@ -808,35 +765,23 @@ def rename_local_attachment(
 
     return dest_path
 
-def copy_to_local_storage(src_path: str, attachment_key: str, known_hash: str | None = None) -> str | None:
-    """Garantir uma cópia local para o anexo recém-processado.
 
-    Retorna:
-        'copied'  -> nova cópia criada.
-        'exists'  -> cópia já estava presente.
-        None      -> falha.
-    """
+def copy_to_local_storage(src_path: str, attachment_key: str, known_hash: str | None = None) -> str | None:
+    """Garante uma cópia local para o anexo recém-processado."""
     if not LOCAL_COPY_DIR:
         return None
 
     try:
         os.makedirs(LOCAL_COPY_DIR, exist_ok=True)
     except Exception as exc:
-        logging.error(
-            "[COPIA-LOCAL] Falha ao preparar diretório local '%s': %s",
-            LOCAL_COPY_DIR,
-            exc,
-        )
+        logging.error("[COPIA-LOCAL] Falha ao preparar diretório local '%s': %s", LOCAL_COPY_DIR, exc)
         return None
 
     dest_dir = os.path.join(LOCAL_COPY_DIR, attachment_key)
     dest_file = os.path.join(dest_dir, os.path.basename(src_path))
 
     if os.path.exists(dest_file):
-        logging.info(
-            "[COPIA-LOCAL] '%s' já existe. Nenhuma nova cópia criada.",
-            dest_file,
-        )
+        logging.info("[COPIA-LOCAL] '%s' já existe. Nenhuma nova cópia criada.", dest_file)
         if known_hash:
             set_cached_hash(dest_file, known_hash, HASH_CACHE)
         return "exists"
@@ -851,24 +796,19 @@ def copy_to_local_storage(src_path: str, attachment_key: str, known_hash: str | 
             compute_sha256(dest_file)
         return "copied"
     except Exception as exc:
-        logging.error(
-            "[COPIA-LOCAL] Falha ao copiar '%s' para '%s': %s",
-            src_path,
-            dest_file,
-            exc,
-        )
+        logging.error("[COPIA-LOCAL] Falha ao copiar '%s' para '%s': %s", src_path, dest_file, exc)
         return None
+
 
 def main():
     """Função principal do script."""
-    print("Iniciando o comparador de PDFs (v1.0 Pyzotero)")
-    
+    print("Iniciando o sincronizador Zotero/WebDAV (v2.0)")
+
     stats = {
         'added': 0,
         'skipped': 0,
         'errors': 0,
         'zotero_attachments_scanned': 0,
-        'zotero_recent_checked': 0,
         'zotero_unique_filenames': 0,
         'folder_total_pdfs': 0,
         'folder_checked_pdfs': 0,
@@ -877,54 +817,35 @@ def main():
         'hash_matches': 0,
         'renamed_webdav': 0,
         'renamed_local': 0,
+        'updated_content': 0,
     }
-    
+
     # 1. Conectar ao Zotero
     try:
         zot = zotero.Zotero(LIBRARY_ID, LIBRARY_TYPE, API_KEY)
-        zot.key_info() 
+        zot.key_info()
         print("✓ Conexão com a Zotero API bem-sucedida.")
     except Exception as e:
         logging.error(f"Falha ao conectar à Zotero API. Verifique suas credenciais. Erro: {e}")
         finalize_execution(stats)
         return
 
-    # 2. Coletar todos os anexos existentes no Zotero
-    print("\nColetando anexos da biblioteca Zotero... (Isso pode levar um tempo)")
+    # 2. Coletar TODOS os anexos existentes no Zotero
+    print("\nColetando anexos da biblioteca Zotero... (pode levar alguns instantes)")
     try:
         (
-            recent_attachments,
+            all_attachments,
             existing_filenames,
             existing_filenames_aggressive,
-        ) = collect_recent_attachments(
-            zot,
-            MAX_ATTACHMENTS_TO_CHECK,
-            stats,
-        )
-        stats['zotero_recent_checked'] = len(recent_attachments)
+        ) = collect_all_attachments(zot, stats)
+
         stats['zotero_unique_filenames'] = len(existing_filenames)
 
-        if not recent_attachments:
-            logging.error("Nenhum anexo recente pôde ser obtido da biblioteca Zotero.")
-            finalize_execution(stats)
-            return
+        if not existing_filenames:
+            logging.warning("[ZOT] Nenhum nome de arquivo indexado. A biblioteca pode estar vazia.")
 
-        print(f"✓ {stats['zotero_recent_checked']} anexos mais recentes coletados (limite {MAX_ATTACHMENTS_TO_CHECK}).")
-        
-        for item in tqdm(recent_attachments, desc="Processando anexos recentes do Zotero"):
-            filename = get_filename_from_item(item)
-            if filename and DEBUG_DETAILED:
-                data = item.get('data', {})
-                date_added = item.get('_parsed_date_added') or data.get('dateAdded')
-                logging.debug(
-                    "[ZOT] dateAdded=%s | original='%s' | norm='%s' | norm_agg='%s'",
-                    date_added,
-                    filename,
-                    normalize_filename(filename),
-                    normalize_aggressive(filename),
-                )
-        
-        print(f"✓ {stats['zotero_unique_filenames']} nomes de arquivos únicos coletados do Zotero.")
+        print(f"✓ {stats['zotero_attachments_scanned']} anexos escaneados | "
+              f"{stats['zotero_unique_filenames']} nomes únicos indexados.")
 
     except Exception as e:
         logging.error(f"Erro ao coletar anexos do Zotero: {e}")
@@ -933,7 +854,7 @@ def main():
 
     hash_index, key_to_path = build_local_storage_index(existing_filenames)
 
-    # 3. Processar arquivos da pasta local
+    # 3. Processar arquivos da pasta WebDAV
     print(f"\nVerificando a pasta: {TARGET_FOLDER}")
     if not os.path.isdir(TARGET_FOLDER):
         logging.error(f"A pasta alvo não foi encontrada ou não é um diretório: {TARGET_FOLDER}")
@@ -941,79 +862,147 @@ def main():
         return
 
     try:
-        files_to_process = collect_recent_pdfs(TARGET_FOLDER, MAX_FILES_TO_CHECK, stats)
-        
+        files_to_process = collect_all_pdfs(TARGET_FOLDER, stats)
+
         if not files_to_process:
             print("Nenhum arquivo PDF encontrado na pasta.")
             finalize_execution(stats)
             return
 
-        stats['folder_checked_pdfs'] = len(files_to_process)
-        
-        print(f"Encontrados {stats['folder_total_pdfs']} PDFs. Verificando os {stats['folder_checked_pdfs']} mais recentes.")
+        print(f"Encontrados {stats['folder_total_pdfs']} PDFs. Processando todos.")
 
-        # 4. Comparar e adicionar arquivos faltantes
+        # 4. Processar cada PDF da pasta WebDAV
+        #
+        # Ordem de verificação para cada arquivo:
+        #
+        # CASO 1 — Nome encontrado no Zotero, hash igual ao storage local
+        #          → Já sincronizado. Ignora.
+        #
+        # CASO 2 — Nome encontrado no Zotero, hash diferente do storage local
+        #          → Conteúdo foi atualizado no WebDAV. Atualiza o arquivo no Zotero.
+        #
+        # CASO 3 — Nome NÃO encontrado, hash encontrado no storage local
+        #          → Arquivo foi renomeado no WebDAV. Atualiza o nome no Zotero e no storage.
+        #
+        # CASO 4 — Nome NÃO encontrado, hash NÃO encontrado
+        #          → Arquivo novo. Adiciona ao Zotero e copia para storage local.
+        #
+        # CASO 5 — Nome encontrado mas não há cópia local (storage vazio para essa key)
+        #          → Garante a cópia local sem re-adicionar ao Zotero.
+        #
+        # Nota de performance: o hash só é calculado nos casos 2-5 (nome não encontrado
+        # ou storage local ausente), evitando baixar arquivos grandes via WebDAV
+        # quando a comparação por nome já é suficiente.
+
         for file_path in tqdm(files_to_process, desc="Verificando arquivos locais"):
             stats['processed'] += 1
             file_name = os.path.basename(file_path)
+            norm_local = normalize_filename(file_name)
+            norm_local_aggressive = normalize_aggressive(file_name)
+
+            nome_info = (
+                existing_filenames.get(norm_local)
+                or existing_filenames_aggressive.get(norm_local_aggressive)
+            )
+            nome_encontrado = nome_info is not None and nome_info.get('key') != '__pending__'
+
+            if nome_encontrado:
+                zotero_key = nome_info['key']
+                local_dir = os.path.join(LOCAL_COPY_DIR, zotero_key)
+                local_file = get_latest_pdf_path(local_dir)
+
+                if local_file and os.path.exists(local_file):
+                    # Temos cópia local — compara hash para detectar atualização de conteúdo
+                    local_hash = compute_sha256(local_file)
+                    webdav_hash = compute_sha256(file_path)
+
+                    if local_hash and webdav_hash and local_hash == webdav_hash:
+                        # CASO 1: nome ok, conteúdo igual → já sincronizado
+                        logging.info("[CASO 1] '%s' já sincronizado (key=%s).", file_name, zotero_key)
+                        stats['skipped'] += 1
+                        stats['hash_matches'] += 1
+                        continue
+
+                    elif local_hash and webdav_hash and local_hash != webdav_hash:
+                        # CASO 2: nome ok, conteúdo diferente → WebDAV tem versão mais nova
+                        logging.info("[CASO 2] '%s' atualizado no WebDAV. Atualizando storage local (key=%s).", file_name, zotero_key)
+                        try:
+                            shutil.copy2(file_path, local_file)
+                            set_cached_hash(local_file, webdav_hash, HASH_CACHE)
+                            register_local_hash(hash_index, key_to_path, zotero_key, local_file, nome_info)
+                            stats['local_copies'] += 1
+                            stats['updated_content'] += 1
+                            logging.info("[CASO 2] Storage local atualizado: '%s'.", local_file)
+                        except Exception as exc:
+                            logging.warning("[CASO 2] Falha ao atualizar storage local de '%s': %s", file_name, exc)
+                            stats['errors'] += 1
+                        stats['skipped'] += 1
+                        continue
+
+                else:
+                    # CASO 5: nome encontrado no Zotero mas sem cópia local
+                    logging.info("[CASO 5] '%s' existe no Zotero mas sem cópia local. Copiando (key=%s).", file_name, zotero_key)
+                    webdav_hash = compute_sha256(file_path)
+                    copy_outcome = copy_to_local_storage(file_path, zotero_key, webdav_hash)
+                    if copy_outcome == "copied":
+                        stats['local_copies'] += 1
+                        new_local = get_latest_pdf_path(local_dir)
+                        if new_local:
+                            register_local_hash(hash_index, key_to_path, zotero_key, new_local, nome_info)
+                    stats['skipped'] += 1
+                    continue
+
+            # Nome não encontrado — calcula hash para casos 3 e 4
             file_hash = compute_sha256(file_path)
             if not file_hash:
                 stats['errors'] += 1
                 logging.error("[HASH] Não foi possível obter hash de '%s'. Arquivo ignorado.", file_name)
                 continue
 
-            norm_local = normalize_filename(file_name)
-            norm_local_aggressive = normalize_aggressive(file_name)
             if DEBUG_DETAILED:
                 logging.debug(
                     "[LOCAL] arquivo='%s' | norm='%s' | norm_agg='%s' | hash=%s",
-                    file_name,
-                    norm_local,
-                    norm_local_aggressive,
-                    file_hash,
+                    file_name, norm_local, norm_local_aggressive, file_hash,
                 )
 
             hash_matches = hash_index.get(file_hash, [])
             if hash_matches:
-                # Já sincronizado, alinhar nomes conforme mtime
+                # CASO 3: hash encontrado, nome diferente → arquivo foi renomeado no WebDAV
                 entry = hash_matches[0]
                 canonical_key = entry['key']
-                canonical_name = entry.get('info', {}).get('original') or entry['filename']
                 canonical_path = entry.get('path')
-                if canonical_path and os.path.exists(canonical_path):
-                    canonical_actual_name = os.path.basename(canonical_path)
-                    canonical_mtime = os.path.getmtime(canonical_path)
-                    if canonical_actual_name:
-                        canonical_name = canonical_actual_name
-                else:
-                    canonical_mtime = 0
-
+                webdav_name = file_name
                 webdav_mtime = os.path.getmtime(file_path)
-                webdav_name = os.path.basename(file_path)
 
-                if canonical_path and os.path.exists(canonical_path) and webdav_name != canonical_name:
+                if canonical_path and os.path.exists(canonical_path):
+                    canonical_name = os.path.basename(canonical_path)
+                    canonical_mtime = os.path.getmtime(canonical_path)
+
+                    logging.info(
+                        "[CASO 3] Mesmo conteúdo, nomes diferentes: WebDAV='%s' | storage='%s' (key=%s).",
+                        webdav_name, canonical_name, canonical_key,
+                    )
+
                     if webdav_mtime > (canonical_mtime + 1):
-                        # WebDAV mais recente -> usar nome do WebDAV
+                        # WebDAV mais recente → atualiza nome no storage e no Zotero
                         updated_path = rename_local_attachment(zot, canonical_key, canonical_path, webdav_name)
                         if updated_path != canonical_path:
                             entry['path'] = updated_path
-                            entry['filename'] = os.path.basename(updated_path)
+                            entry['filename'] = webdav_name
                             key_to_path[canonical_key] = updated_path
-                            canonical_name = entry['filename']
                             stats['renamed_local'] += 1
+                            logging.info("[CASO 3] Nome atualizado no storage: '%s'.", webdav_name)
                     else:
-                        # Storage local mais recente -> alinhar nome do WebDAV
+                        # Storage mais recente → renomeia o arquivo no WebDAV
                         new_path = rename_webdav_file(file_path, canonical_name)
                         if new_path != file_path:
                             file_path = new_path
-                            webdav_name = canonical_name
+                            file_name = canonical_name
                             stats['renamed_webdav'] += 1
-                elif canonical_path and os.path.exists(canonical_path):
-                    canonical_name = os.path.basename(canonical_path)
+                            logging.info("[CASO 3] Nome atualizado no WebDAV: '%s'.", canonical_name)
                 else:
                     canonical_name = webdav_name
 
-                file_name = os.path.basename(file_path)
                 norm_local = normalize_filename(file_name)
                 norm_local_aggressive = normalize_aggressive(file_name)
                 info = {'original': canonical_name, 'key': canonical_key}
@@ -1021,21 +1010,20 @@ def main():
                 existing_filenames_aggressive[norm_local_aggressive] = info
                 stats['skipped'] += 1
                 stats['hash_matches'] += 1
-                logging.info("[HASH] '%s' já sincronizado (key=%s).", file_name, canonical_key)
                 continue
 
-            encontrado = (norm_local in existing_filenames or norm_local_aggressive in existing_filenames_aggressive)
-
-            if encontrado:
-                if DEBUG_DETAILED:
-                    logging.info(f"[IGNORADO] '{file_name}' já existe na biblioteca.")
-                stats['skipped'] += 1
-                continue
+            # CASO 4: nome e hash não encontrados → arquivo novo
+            # Registra como pendente antes de chamar a API para evitar duplicatas
+            # caso o mesmo arquivo apareça duas vezes no loop.
+            existing_filenames[norm_local] = {'original': file_name, 'key': '__pending__'}
+            existing_filenames_aggressive[norm_local_aggressive] = {'original': file_name, 'key': '__pending__'}
 
             try:
-                logging.info(f"[ADICIONANDO] '{file_name}'...")
+                logging.info("[CASO 4] Adicionando '%s' ao Zotero...", file_name)
                 response = zot.attachment_simple([file_path])
                 if not response:
+                    existing_filenames.pop(norm_local, None)
+                    existing_filenames_aggressive.pop(norm_local_aggressive, None)
                     stats['errors'] += 1
                     logging.error("[ERRO] Resposta vazia ao adicionar '%s'.", file_name)
                     continue
@@ -1043,17 +1031,16 @@ def main():
                 success_items = _coerce_response_items(response.get("success"))
                 unchanged_items = _coerce_response_items(response.get("unchanged"))
                 failure_items = _coerce_response_items(response.get("failure"))
-
                 handled = False
 
                 if success_items:
-                    attachment_info = success_items[0]
-                    new_key = attachment_info.get("key")
+                    new_key = success_items[0].get("key")
                     if not new_key:
+                        existing_filenames.pop(norm_local, None)
+                        existing_filenames_aggressive.pop(norm_local_aggressive, None)
                         stats['errors'] += 1
                         logging.error("[ERRO] Chave não retornada para '%s'. Resposta: %s", file_name, response)
                         continue
-
                     stats['added'] += 1
                     info = {'original': file_name, 'key': new_key}
                     existing_filenames[norm_local] = info
@@ -1062,16 +1049,18 @@ def main():
                     if copy_outcome == "copied":
                         stats['local_copies'] += 1
                     elif copy_outcome is None:
-                        logging.warning("[COPIA-LOCAL] Não foi possível copiar '%s' para o storage local.", file_name)
+                        logging.warning("[COPIA-LOCAL] Não foi possível copiar '%s'.", file_name)
                     local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, new_key))
                     if local_path and os.path.exists(local_path):
                         register_local_hash(hash_index, key_to_path, new_key, local_path, info)
+                    logging.info("[CASO 4] '%s' adicionado com sucesso (key=%s).", file_name, new_key)
                     handled = True
 
                 if unchanged_items:
-                    attachment_info = unchanged_items[0]
-                    existing_key = attachment_info.get("key")
+                    existing_key = unchanged_items[0].get("key")
                     if not existing_key:
+                        existing_filenames.pop(norm_local, None)
+                        existing_filenames_aggressive.pop(norm_local_aggressive, None)
                         stats['errors'] += 1
                         logging.error("[ERRO] Chave ausente para '%s' (unchanged). Resposta: %s", file_name, response)
                     else:
@@ -1082,32 +1071,30 @@ def main():
                         copy_outcome = copy_to_local_storage(file_path, existing_key, file_hash)
                         if copy_outcome == "copied":
                             stats['local_copies'] += 1
-                        elif copy_outcome is None:
-                            logging.warning("[COPIA-LOCAL] Não foi possível garantir cópia local de '%s'.", file_name)
                         local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, existing_key))
                         if local_path and os.path.exists(local_path):
                             register_local_hash(hash_index, key_to_path, existing_key, local_path, info)
-                        logging.info("[IGNORADO] '%s' já existia no Zotero (unchanged).", file_name)
+                        logging.info("[CASO 4] '%s' já existia no Zotero (unchanged, key=%s).", file_name, existing_key)
                     handled = True
 
                 if not handled:
+                    existing_filenames.pop(norm_local, None)
+                    existing_filenames_aggressive.pop(norm_local_aggressive, None)
                     stats['errors'] += 1
-                    logging.error(
-                        "[ERRO] Falha ao adicionar '%s'. Falhas: %s",
-                        file_name,
-                        failure_items or response,
-                    )
+                    logging.error("[ERRO] Falha ao adicionar '%s'. Falhas: %s", file_name, failure_items or response)
 
             except Exception as e:
+                existing_filenames.pop(norm_local, None)
+                existing_filenames_aggressive.pop(norm_local_aggressive, None)
                 stats['errors'] += 1
-                logging.error(f"[ERRO] Exceção ao adicionar '{file_name}': {e}")
-                    
+                logging.error("[ERRO] Exceção ao adicionar '%s': %s", file_name, e)
+
     except Exception as e:
         logging.error(f"Erro ao processar arquivos da pasta: {e}")
         finalize_execution(stats)
         return
 
-    # 5. Gerar relatório final
+    # 5. Relatório final
     total_verificados = stats['processed'] or stats['folder_checked_pdfs']
     pct_adicionados = ((stats['added'] / total_verificados) * 100) if total_verificados > 0 else 0
     pct_ignorados = ((stats['skipped'] / total_verificados) * 100) if total_verificados > 0 else 0
@@ -1115,7 +1102,7 @@ def main():
 
     summary = f"""
 ╔════════════════════════════════════════════════════════╗
-║                   RELATÓRIO FINAL                      ║
+║           RELATÓRIO FINAL  (v2.0)                      ║
 ╚════════════════════════════════════════════════════════╝
 
 📂 Pasta: {TARGET_FOLDER}
@@ -1123,19 +1110,19 @@ def main():
 
 ┌─── 📊 COLETA DE ANEXOS ──────────────────────────────┐
 │ Anexos varridos (total): {stats['zotero_attachments_scanned']:<25} │
-│ Anexos recentes analisados: {stats['zotero_recent_checked']:<21} │
-│ Nomes únicos recentes: {stats['zotero_unique_filenames']:<28} │
+│ Nomes únicos indexados:  {stats['zotero_unique_filenames']:<25} │
 └──────────────────────────────────────────────────────┘
 
 ┌─── 📈 RESULTADOS DA VERIFICAÇÃO ───────────────────────┐
 │ PDFs totais na pasta: {stats['folder_total_pdfs']:<30} │
-│ 🔍 Processados (loop): {total_verificados:<30} │
+│ 🔍 Processados: {total_verificados:<36} │
 │ ──────────────────────────────────────────────────── │
-│ ✅ Adicionados: {stats['added']} ({pct_adicionados:.1f}%) {' ' * (33 - len(str(stats['added']) + str(pct_adicionados)))}│
-│ ⏭️  Existentes: {stats['skipped']} ({pct_ignorados:.1f}%) {' ' * (33 - len(str(stats['skipped']) + str(pct_ignorados)))}│
+│ ✅ Adicionados: {stats['added']} ({pct_adicionados:.1f}%) {' ' * (33 - len(str(stats['added']) + str(round(pct_adicionados,1))))}│
+│ ⏭️  Existentes: {stats['skipped']} ({pct_ignorados:.1f}%) {' ' * (33 - len(str(stats['skipped']) + str(round(pct_ignorados,1))))}│
 │ 💾 Cópias locais: {stats['local_copies']:<34} │
-│ ❌ Erros: {stats['errors']} ({pct_erros:.1f}%) {' ' * (38 - len(str(stats['errors']) + str(pct_erros)))}│
+│ ❌ Erros: {stats['errors']} ({pct_erros:.1f}%) {' ' * (38 - len(str(stats['errors']) + str(round(pct_erros,1))))}│
 │ 🔁 Hash reaproveitados: {stats['hash_matches']:<23} │
+│ 🔄 Conteúdo atualizado: {stats['updated_content']:<23} │
 │ ✏️  Renomes WebDAV: {stats['renamed_webdav']:<27} │
 │ 📝 Renomes storage: {stats['renamed_local']:<27} │
 └──────────────────────────────────────────────────────┘
@@ -1144,6 +1131,7 @@ def main():
 """
     print(summary)
     finalize_execution(stats, summary)
+
 
 if __name__ == "__main__":
     main()
