@@ -822,6 +822,61 @@ def rename_cache_entry(cache: Dict[str, dict], old_path: str, new_path: str) -> 
         cache[new_abs] = entry
 
 
+def remove_cache_entry(cache: Dict[str, dict], path: str) -> None:
+    """Remove uma entrada do cache quando um arquivo deixa de existir."""
+    cache.pop(_normalize_cache_path(path), None)
+
+
+def delete_redundant_webdav_duplicate(
+    redundant_path: str,
+    canonical_path: str,
+    canonical_hash: str | None = None,
+    ) -> bool:
+    """Remove um duplicado redundante no drive quando o canônico já existe.
+
+    Só remove automaticamente quando os dois arquivos têm o mesmo hash. Isso permite
+    consolidar colisões de nome no caso 3 sem sobrescrever conteúdo diferente.
+    """
+    if not redundant_path or not canonical_path or redundant_path == canonical_path:
+        return False
+    if not os.path.exists(redundant_path) or not os.path.exists(canonical_path):
+        return False
+
+    keep_hash = canonical_hash or compute_sha256(canonical_path)
+    redundant_hash = compute_sha256(redundant_path)
+    if not keep_hash or not redundant_hash:
+        logging.warning(
+            "[RENOMEIO] Não foi possível validar hashes para consolidar '%s' e '%s'.",
+            redundant_path,
+            canonical_path,
+        )
+        return False
+    if keep_hash != redundant_hash:
+        logging.warning(
+            "[RENOMEIO] Colisão de nome entre '%s' e '%s' com conteúdo diferente. Revisão manual necessária.",
+            redundant_path,
+            canonical_path,
+        )
+        return False
+
+    try:
+        os.remove(redundant_path)
+        remove_cache_entry(HASH_CACHE, redundant_path)
+        logging.info(
+            "[RENOMEIO] Duplicado redundante removido do drive: '%s'. Canônico preservado: '%s'.",
+            redundant_path,
+            canonical_path,
+        )
+        return True
+    except OSError as exc:
+        logging.warning(
+            "[RENOMEIO] Falha ao remover duplicado redundante '%s': %s",
+            redundant_path,
+            exc,
+        )
+        return False
+
+
 def compute_sha256(
     path: str,
     cache: Dict[str, dict] | None = None,
@@ -1126,6 +1181,7 @@ def main():
         'renamed_local': 0,
         'updated_content': 0,
         'mtime_ties': 0,
+        'pruned_drive_duplicates': 0,
     }
     tie_conflicts: list[dict[str, str]] = []
 
@@ -1343,13 +1399,25 @@ def main():
                             entry_info['dateModified'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
                             stats['renamed_local'] += 1
                             logging.info("[CASO 3] Zotero atualizado para o nome mais recente do drive: '%s'.", webdav_name)
+
+                        canonical_drive_path = os.path.join(os.path.dirname(file_path), canonical_name)
+                        if canonical_drive_path != file_path and os.path.exists(canonical_drive_path):
+                            if delete_redundant_webdav_duplicate(canonical_drive_path, file_path, canonical_hash=file_hash):
+                                stats['pruned_drive_duplicates'] += 1
                     elif zotero_ts > drive_ts:
-                        new_path = rename_webdav_file(file_path, canonical_name)
-                        if new_path != file_path:
-                            file_path = new_path
-                            file_name = canonical_name
-                            stats['renamed_webdav'] += 1
-                            logging.info("[CASO 3] Drive atualizado para o nome mais recente do Zotero: '%s'.", canonical_name)
+                        canonical_drive_path = os.path.join(os.path.dirname(file_path), canonical_name)
+                        if canonical_drive_path != file_path and os.path.exists(canonical_drive_path):
+                            if delete_redundant_webdav_duplicate(file_path, canonical_drive_path):
+                                file_path = canonical_drive_path
+                                file_name = canonical_name
+                                stats['pruned_drive_duplicates'] += 1
+                        else:
+                            new_path = rename_webdav_file(file_path, canonical_name)
+                            if new_path != file_path:
+                                file_path = new_path
+                                file_name = canonical_name
+                                stats['renamed_webdav'] += 1
+                                logging.info("[CASO 3] Drive atualizado para o nome mais recente do Zotero: '%s'.", canonical_name)
                     else:
                         stats['mtime_ties'] += 1
                         tie_conflicts.append({
@@ -1500,6 +1568,7 @@ def main():
 │ 🔄 Conteúdo atualizado: {stats['updated_content']:<23} │
 │ ✏️  Renomes WebDAV: {stats['renamed_webdav']:<27} │
 │ 📝 Renomes storage: {stats['renamed_local']:<27} │
+│ 🧹 Duplicados removidos: {stats['pruned_drive_duplicates']:<22} │
 │ ⚖️  Empates de mtime: {stats['mtime_ties']:<25} │
 └──────────────────────────────────────────────────────┘
 {tie_summary}
