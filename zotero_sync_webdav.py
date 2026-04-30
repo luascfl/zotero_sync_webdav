@@ -1,3 +1,46 @@
+"""Sincronizador bidirecional assistido entre uma pasta de PDFs no drive montado,
+a biblioteca Zotero via API e o storage local em ~/Zotero/storage.
+
+Workflow real deste script:
+1. Lê configuração e resolve a pasta alvo montada no sistema de arquivos.
+2. Consulta a API do Zotero para descobrir quais anexos já existem e qual chave cada
+   nome conhecido aponta no servidor.
+3. Indexa o storage local do Zotero em ~/Zotero/storage por hash SHA-256.
+   Essa cópia local não é só cache. Ela é a âncora operacional do fluxo:
+   - permite comparar conteúdo sem depender apenas do nome,
+   - permite detectar renomeações entre drive e Zotero,
+   - permite reconstruir a cópia local quando o Zotero conhece o anexo mas o storage
+     local ainda não tem o PDF correspondente.
+4. Varre os PDFs da pasta montada no drive.
+5. Para cada PDF do drive, decide entre cinco caminhos:
+   - caso 1: mesmo nome e mesmo conteúdo, então já está sincronizado;
+   - caso 2: mesmo nome e conteúdo diferente, então o drive passou a ser a versão
+     mais recente e a cópia local do Zotero é atualizada;
+   - caso 3: mesmo conteúdo e nomes diferentes, então há conflito de nome e o lado
+     mais recente por mtime define o título canônico temporário;
+   - caso 4: o arquivo existe no drive, mas não existe no Zotero, então ele é enviado
+     ao Zotero e também copiado para ~/Zotero/storage;
+   - caso 5: o Zotero conhece o anexo, mas a cópia local em ~/Zotero/storage está
+     ausente, então a cópia local é recriada a partir do drive.
+
+Regras operacionais definidas pelo usuário para conflitos:
+- presença é bidirecional: drive sem Zotero deve ir para o Zotero; Zotero sem drive
+  deve ser materializado no drive em uma futura etapa de reconciliação completa;
+- em hash_match com nomes diferentes, o lado com mtime mais recente vira a fonte de
+  verdade temporária para o título;
+- se o Zotero estiver mais recente, renomeia-se o drive;
+- se o drive estiver mais recente, modifica-se o Zotero para refletir o nome do drive,
+  porque esse foi o ajuste manual mais recente do usuário.
+
+Limites atuais importantes:
+- a implementação já cobre bem a direção drive -> Zotero e a reconstrução da cópia
+  local do Zotero;
+- a presença Zotero -> drive ainda não é uma reconciliação global completa, apesar de
+  a política do projeto já exigir isso;
+- mounts FUSE/rclone podem listar arquivos mas travar na leitura do conteúdo, então o
+  script faz probes e usa timeouts para distinguir lentidão de mount quebrado.
+"""
+
 import atexit
 import hashlib
 import heapq
@@ -89,7 +132,10 @@ def resolve_target_folder(raw_path: str) -> str:
 
 TARGET_FOLDER = resolve_target_folder(TARGET_FOLDER_RAW)
 
-# Pasta onde será criada a cópia local quando um novo anexo for enviado ao Zotero.
+# Pasta onde o Zotero Desktop espera encontrar os anexos importados.
+# Esta cópia local em ~/Zotero/storage é necessária para o workflow prático do projeto:
+# sem ela, o script perde a referência de conteúdo usada para comparar hashes,
+# reconstruir anexos locais ausentes e decidir renomeações entre drive e Zotero.
 LOCAL_COPY_DIR = os.path.join(os.path.expanduser("~"), "Zotero", "storage")
 
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "zotero_sync_webdav")
@@ -762,7 +808,13 @@ def get_latest_pdf_path(directory: str) -> str | None:
 
 
 def build_local_storage_index(existing_filenames: Dict[str, dict]) -> Tuple[Dict[str, List[dict]], Dict[str, str]]:
-    """Indexa os anexos locais já sincronizados por SHA-256."""
+    """Indexa por hash a cópia local do Zotero em ~/Zotero/storage.
+
+    O storage local funciona como espelho operacional dos anexos já conhecidos pelo
+    Zotero. Quando a API conhece um item, mas o PDF local sumiu, o script tenta
+    reconstruir essa cópia. Quando drive e Zotero têm o mesmo conteúdo com nomes
+    diferentes, o storage local permite comparar mtime e decidir qual lado deve ceder.
+    """
     hash_index: Dict[str, List[dict]] = {}
     key_to_path: Dict[str, str] = {}
     seen_keys: set[str] = set()
@@ -942,7 +994,8 @@ def copy_to_local_storage(src_path: str, attachment_key: str, known_hash: str | 
 
 
 def main():
-    """Função principal do script."""
+    """Executa a sincronização observando API do Zotero, drive montado e storage local.
+"""
     print("Iniciando o sincronizador Zotero/WebDAV (v2.0)")
 
     stats = {
@@ -995,7 +1048,8 @@ def main():
 
     hash_index, key_to_path = build_local_storage_index(existing_filenames)
 
-    # 3. Processar arquivos da pasta WebDAV
+    # 3. Processar arquivos da pasta montada no drive.
+    #
     print(f"\nVerificando a pasta: {TARGET_FOLDER}")
     if not os.path.isdir(TARGET_FOLDER):
         logging.error(f"A pasta alvo não foi encontrada ou não é um diretório: {TARGET_FOLDER}")
