@@ -120,3 +120,8 @@ Return a concise result with files changed and command results.
 - 2026-04-30: removidos novamente os três anexos quebrados recriados na execução com o bug original: `CBN5PRCZ`, `6EG8BPHJ` e `GSG8K48S`.
 - 2026-04-30: com o patch de upload e o mount em `Google Drive:`, a sincronização concluída em `2026-04-30T19:35:19.764787` registrou `3` adicionados, `458` existentes, `3` cópias locais e `0` erros.
 - 2026-04-30: diagnóstico final após o patch mostrou `859` anexos na API, `461` PDFs no drive e apenas `15` ausentes por nome; os três uploads problemáticos (`Clínica pulsional do bebê - Marie Couvert 2020.pdf`, `Pós-verdade.pdf`, `Orientação vocacional e de carreira - Rosane Levenfus.pdf`) deixaram de aparecer como ausentes.
+- 2026-04-30: `zotero_sync_webdav.py` passou a carregar `dateModified` dos anexos Zotero durante a coleta, usar esse campo como fonte principal de `mtime` no caso 3 e atualizar `title` e `filename` do Zotero quando o drive for mais recente.
+- 2026-04-30: o relatório final do script agora inclui `⚖️ Empates de mtime` e lista detalhada de conflitos empatados quando existirem.
+- 2026-04-30: sync executado com a nova regra de `mtime` em `2026-04-30T20:08:41.566923` concluiu com `0` adicionados, `461` existentes, `0` erros e `0` empates de `mtime`.
+- 2026-04-30: os 15 casos remanescentes não foram renomeados porque o nome canônico já existia como outro arquivo no drive; o script tentou renomear e encontrou colisão de destino, preservando ambos os nomes em vez de sobrescrever ou apagar automaticamente.
+- 2026-04-30: diagnóstico pós-sync permaneceu em `15` ausentes por nome no Zotero, confirmando que o restante do problema agora é colisão de arquivos duplicados no drive, não regra de `mtime` nem falha de upload.

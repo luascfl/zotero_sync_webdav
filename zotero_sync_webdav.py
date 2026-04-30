@@ -620,7 +620,11 @@ def collect_all_attachments(
 
             filename = get_filename_from_item(item)
             if filename:
-                info = {'original': filename, 'key': item['key']}
+                info = {
+                    'original': filename,
+                    'key': item['key'],
+                    'dateModified': data.get('dateModified'),
+                }
                 norm_file = normalize_filename(filename)
                 norm_agg_file = normalize_aggressive(filename)
                 # Guarda o primeiro encontrado (mais recente, pois ordenamos desc)
@@ -1057,8 +1061,7 @@ def rename_local_attachment(
     try:
         item_data = item.get('data', {})
         item_data['filename'] = new_filename
-        if not item_data.get('title') or item_data['title'] == current_name:
-            item_data['title'] = new_filename
+        item_data['title'] = new_filename
         item['data'] = item_data
         zot.update_item(item)
         logging.info("[RENOMEIO] Anexo %s atualizado para '%s'.", key, new_filename)
@@ -1122,7 +1125,9 @@ def main():
         'renamed_webdav': 0,
         'renamed_local': 0,
         'updated_content': 0,
+        'mtime_ties': 0,
     }
+    tie_conflicts: list[dict[str, str]] = []
 
     # 1. Conectar ao Zotero
     try:
@@ -1301,7 +1306,7 @@ def main():
 
             hash_matches = hash_index.get(file_hash, [])
             if hash_matches:
-                # CASO 3: hash encontrado, nome diferente → arquivo foi renomeado no WebDAV
+                # CASO 3: hash encontrado, nome diferente → reconciliar nomes pelo mtime
                 entry = hash_matches[0]
                 canonical_key = entry['key']
                 canonical_path = entry.get('path')
@@ -1309,37 +1314,63 @@ def main():
                 webdav_mtime = os.path.getmtime(file_path)
 
                 if canonical_path and os.path.exists(canonical_path):
+                    entry_info = entry.get('info', {}) or {}
                     canonical_name = os.path.basename(canonical_path)
-                    canonical_mtime = os.path.getmtime(canonical_path)
+                    local_copy_mtime = os.path.getmtime(canonical_path)
+                    zotero_date_modified = parse_zotero_date(entry_info.get('dateModified', ''))
+                    zotero_mtime = zotero_date_modified.timestamp() if zotero_date_modified else local_copy_mtime
 
                     logging.info(
                         "[CASO 3] Mesmo conteúdo, nomes diferentes: WebDAV='%s' | storage='%s' (key=%s).",
                         webdav_name, canonical_name, canonical_key,
                     )
+                    logging.info(
+                        "[CASO 3] Datas: drive=%.3f | zotero=%.3f | local_copy=%.3f.",
+                        webdav_mtime,
+                        zotero_mtime,
+                        local_copy_mtime,
+                    )
 
-                    if webdav_mtime > (canonical_mtime + 1):
-                        # WebDAV mais recente → atualiza nome no storage e no Zotero
+                    drive_ts = int(webdav_mtime)
+                    zotero_ts = int(zotero_mtime)
+
+                    if drive_ts > zotero_ts:
                         updated_path = rename_local_attachment(zot, canonical_key, canonical_path, webdav_name)
                         if updated_path != canonical_path:
                             entry['path'] = updated_path
                             entry['filename'] = webdav_name
                             key_to_path[canonical_key] = updated_path
+                            entry_info['dateModified'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
                             stats['renamed_local'] += 1
-                            logging.info("[CASO 3] Nome atualizado no storage: '%s'.", webdav_name)
-                    else:
-                        # Storage mais recente → renomeia o arquivo no WebDAV
+                            logging.info("[CASO 3] Zotero atualizado para o nome mais recente do drive: '%s'.", webdav_name)
+                    elif zotero_ts > drive_ts:
                         new_path = rename_webdav_file(file_path, canonical_name)
                         if new_path != file_path:
                             file_path = new_path
                             file_name = canonical_name
                             stats['renamed_webdav'] += 1
-                            logging.info("[CASO 3] Nome atualizado no WebDAV: '%s'.", canonical_name)
+                            logging.info("[CASO 3] Drive atualizado para o nome mais recente do Zotero: '%s'.", canonical_name)
+                    else:
+                        stats['mtime_ties'] += 1
+                        tie_conflicts.append({
+                            'key': canonical_key,
+                            'drive_name': webdav_name,
+                            'zotero_name': canonical_name,
+                        })
+                        logging.warning(
+                            "[CASO 3] Empate de mtime entre drive e Zotero para key=%s. Mantidos os nomes atuais para revisão manual.",
+                            canonical_key,
+                        )
                 else:
                     canonical_name = webdav_name
 
                 norm_local = normalize_filename(file_name)
                 norm_local_aggressive = normalize_aggressive(file_name)
-                info = {'original': canonical_name, 'key': canonical_key}
+                info = {
+                    'original': canonical_name,
+                    'key': canonical_key,
+                    'dateModified': (entry.get('info') or {}).get('dateModified'),
+                }
                 existing_filenames[norm_local] = info
                 existing_filenames_aggressive[norm_local_aggressive] = info
                 stats['skipped'] += 1
@@ -1376,7 +1407,7 @@ def main():
                         logging.error("[ERRO] Chave não retornada para '%s'. Resposta: %s", file_name, response)
                         continue
                     stats['added'] += 1
-                    info = {'original': file_name, 'key': new_key}
+                    info = {'original': file_name, 'key': new_key, 'dateModified': None}
                     existing_filenames[norm_local] = info
                     existing_filenames_aggressive[norm_local_aggressive] = info
                     copy_outcome = copy_to_local_storage(file_path, new_key, file_hash)
@@ -1399,7 +1430,7 @@ def main():
                         logging.error("[ERRO] Chave ausente para '%s' (unchanged). Resposta: %s", file_name, response)
                     else:
                         stats['skipped'] += 1
-                        info = {'original': file_name, 'key': existing_key}
+                        info = {'original': file_name, 'key': existing_key, 'dateModified': None}
                         existing_filenames[norm_local] = info
                         existing_filenames_aggressive[norm_local_aggressive] = info
                         copy_outcome = copy_to_local_storage(file_path, existing_key, file_hash)
@@ -1435,6 +1466,15 @@ def main():
     pct_ignorados = ((stats['skipped'] / total_verificados) * 100) if total_verificados > 0 else 0
     pct_erros = ((stats['errors'] / total_verificados) * 100) if total_verificados > 0 else 0
 
+    tie_summary = ""
+    if tie_conflicts:
+        tie_lines = ["", f"⚖️ Empates de mtime para revisão manual: {len(tie_conflicts)}"]
+        for conflict in tie_conflicts:
+            tie_lines.append(
+                f"- key={conflict['key']} | drive='{conflict['drive_name']}' | zotero='{conflict['zotero_name']}'"
+            )
+        tie_summary = "\n".join(tie_lines)
+
     summary = f"""
 ╔════════════════════════════════════════════════════════╗
 ║           RELATÓRIO FINAL  (v2.0)                      ║
@@ -1460,7 +1500,9 @@ def main():
 │ 🔄 Conteúdo atualizado: {stats['updated_content']:<23} │
 │ ✏️  Renomes WebDAV: {stats['renamed_webdav']:<27} │
 │ 📝 Renomes storage: {stats['renamed_local']:<27} │
+│ ⚖️  Empates de mtime: {stats['mtime_ties']:<25} │
 └──────────────────────────────────────────────────────┘
+{tie_summary}
 
 ✨ Processamento concluído!
 """
