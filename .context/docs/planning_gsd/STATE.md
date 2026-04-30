@@ -95,3 +95,11 @@ Return a concise result with files changed and command results.
 - 2026-04-30: validation passed: `python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py`.
 - 2026-04-30: probe validation passed locally: `.gitignore` read probe returned `True`; mount probe for `/home/lucas/Koofr WebDAV GDrive/zoterodb/Breve histórico das mudanças na regulação do trabalho no Brasil.pdf` timed out after 5s and returned `False`.
 - 2026-04-30: sync is blocked by the rclone/Koofr content-read failure, not by Zotero API credentials or Zotero DB availability.
+- 2026-04-30: alternate rclone path test showed `Google Drive:zoterodb/Breve histórico das mudanças na regulação do trabalho no Brasil.pdf` reads successfully, while `Koofr WebDAV GDrive:zoterodb/...` fails with `unexpected EOF`.
+- 2026-04-30: stopped user service `rclone-koofr-webdav-gdrive.service` for the session and mounted `Google Drive:` at `/home/lucas/Koofr WebDAV GDrive`; `findmnt` then showed source `Google Drive:` and the 1.11 MiB probe file hashed in 2.11s.
+- 2026-04-30: first successful sync pass over `Google Drive:` source processed 461 PDFs and reported 15 added, 442 existing, 39 local copies, 3 content updates, 25 WebDAV renames, and 4 errors.
+- 2026-04-30: second sync pass with warmed cache reported 1 added, 457 existing, 2 local copies, 0 content updates, 0 WebDAV renames, and 3 errors.
+- 2026-04-30: final diagnostic found 862 Zotero API attachments, 461 PDFs in target folder, 7 duplicate groups, and 18 PDFs without filename match.
+- 2026-04-30: hash classification of the 18 remaining filename misses found most have matching content under different Zotero storage names; `Clínica pulsional do bebê - Marie Couvert 2020.pdf`, `Orientação vocacional e de carreira - Rosane Levenfus.pdf`, and `Pós-verdade.pdf` had no local-storage hash match after the sync attempts.
+- 2026-04-30: sync created duplicate path-named Zotero attachments for the three upload-timeout files; cleanup would require explicit deletion/metadata repair through the Zotero API.
+- 2026-04-30: local Zotero SQLite counts after sync remained `items=2841`, `itemAttachments=896`, `collections=51`; API attachment count differs because local Zotero DB has not necessarily synced down the remote API changes yet.
