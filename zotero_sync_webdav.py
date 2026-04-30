@@ -165,6 +165,7 @@ MAX_ATTACHMENTS_TO_CHECK = 0  # 0 = todos os anexos do Zotero
 DEBUG_DETAILED = True
 HASH_READ_TIMEOUT_SECONDS_DEFAULT = 180
 CONTENT_PROBE_TIMEOUT_SECONDS_DEFAULT = 60
+PYZOTERO_UPLOAD_TIMEOUT_SECONDS_DEFAULT = 900
 
 
 def get_env_int(name: str, default: int) -> int:
@@ -188,6 +189,56 @@ CONTENT_PROBE_TIMEOUT_SECONDS = get_env_int(
     "ZOTERO_CONTENT_PROBE_TIMEOUT_SECONDS",
     CONTENT_PROBE_TIMEOUT_SECONDS_DEFAULT,
 )
+PYZOTERO_UPLOAD_TIMEOUT_SECONDS = get_env_int(
+    "ZOTERO_UPLOAD_TIMEOUT_SECONDS",
+    PYZOTERO_UPLOAD_TIMEOUT_SECONDS_DEFAULT,
+)
+
+
+def configure_pyzotero_upload_transport(
+    timeout_seconds: int = PYZOTERO_UPLOAD_TIMEOUT_SECONDS,
+) -> None:
+    """Ajusta timeouts e exceções do upload Pyzotero/httpx para arquivos grandes.
+
+    Pyzotero 1.7.3 chama `httpx.post(...)` diretamente no upload S3 usando o
+    timeout padrão do httpx. Esse padrão é curto para PDFs grandes e pode gerar
+    `WriteTimeout`. Além disso, essa versão tenta capturar `httpx.ConnectionError`,
+    atributo que não existe em httpx 0.28.1, mascarando o erro real com
+    `module 'httpx' has no attribute 'ConnectionError'`.
+    """
+    httpx_module = zotero.httpx
+
+    if not hasattr(httpx_module, "ConnectionError"):
+        httpx_module.ConnectionError = httpx_module.TransportError
+        logging.info(
+            "[ZOT-UPLOAD] Compatibilidade aplicada: httpx.ConnectionError -> httpx.TransportError."
+        )
+
+    if getattr(httpx_module, "_zotero_sync_webdav_post_patched", False):
+        return
+
+    original_post = httpx_module.post
+
+    def post_with_upload_timeout(*args, **kwargs):
+        if "timeout" not in kwargs:
+            if timeout_seconds > 0:
+                kwargs["timeout"] = httpx_module.Timeout(
+                    timeout_seconds,
+                    connect=min(timeout_seconds, 30),
+                    read=timeout_seconds,
+                    write=timeout_seconds,
+                    pool=timeout_seconds,
+                )
+            else:
+                kwargs["timeout"] = None
+        return original_post(*args, **kwargs)
+
+    httpx_module.post = post_with_upload_timeout
+    httpx_module._zotero_sync_webdav_post_patched = True
+    logging.info(
+        "[ZOT-UPLOAD] Timeout padrão para upload Pyzotero configurado em %ss.",
+        timeout_seconds if timeout_seconds > 0 else "sem limite",
+    )
 
 
 def probe_pdf_content_read(
@@ -608,6 +659,64 @@ def _coerce_response_items(items):
     return [items]
 
 
+def cleanup_failed_attachment_upload(zot: zotero.Zotero, source_path: str) -> int:
+    """Remove anexos preliminares quebrados após falha de upload Pyzotero.
+
+    Quando o Pyzotero cria o item preliminar no Zotero, mas o upload S3 falha,
+    podem sobrar anexos sem pai, sem contentType e com `filename` derivado do
+    caminho absoluto local. Esses itens não representam um anexo funcional e
+    causam duplicatas em execuções futuras.
+    """
+    basename = os.path.basename(source_path)
+    path_filename = os.path.abspath(source_path).replace(os.sep, "_")
+    deleted = 0
+
+    try:
+        candidates = zot.items(
+            itemType="attachment",
+            limit=100,
+            start=0,
+            sort="dateAdded",
+            direction="desc",
+        )
+    except Exception as exc:
+        logging.warning(
+            "[ZOT-UPLOAD] Não foi possível buscar anexos recentes para limpar falha de upload de '%s': %s",
+            basename,
+            exc,
+        )
+        return 0
+
+    for item in candidates:
+        data = item.get("data", {})
+        if data.get("title") != basename:
+            continue
+        if data.get("filename") != path_filename:
+            continue
+        if data.get("parentItem") or data.get("contentType"):
+            continue
+        if data.get("linkMode") != "imported_file":
+            continue
+
+        key = item.get("key")
+        try:
+            zot.delete_item(item)
+            deleted += 1
+            logging.warning(
+                "[ZOT-UPLOAD] Anexo preliminar quebrado removido após falha de upload: key=%s filename='%s'.",
+                key,
+                data.get("filename"),
+            )
+        except Exception as exc:
+            logging.error(
+                "[ZOT-UPLOAD] Falha ao remover anexo preliminar quebrado key=%s: %s",
+                key,
+                exc,
+            )
+
+    return deleted
+
+
 def _normalize_cache_path(path: str) -> str:
     return os.path.abspath(path)
 
@@ -996,6 +1105,7 @@ def copy_to_local_storage(src_path: str, attachment_key: str, known_hash: str | 
 def main():
     """Executa a sincronização observando API do Zotero, drive montado e storage local.
 """
+    configure_pyzotero_upload_transport()
     print("Iniciando o sincronizador Zotero/WebDAV (v2.0)")
 
     stats = {
@@ -1312,6 +1422,7 @@ def main():
                 existing_filenames_aggressive.pop(norm_local_aggressive, None)
                 stats['errors'] += 1
                 logging.error("[ERRO] Exceção ao adicionar '%s': %s", file_name, e)
+                cleanup_failed_attachment_upload(zot, file_path)
 
     except Exception as e:
         logging.error(f"Erro ao processar arquivos da pasta: {e}")
