@@ -86,3 +86,12 @@ Return a concise result with files changed and command results.
 - 2026-04-30: PRD skill instructions observed in Ralph package at `/home/lucas/.nvm/versions/node/v22.21.1/lib/node_modules/@iannuttall/ralph/skills/prd/SKILL.md` because `skill://prd` was unavailable in this harness.
 - 2026-04-30: `python3 -m json.tool .context/prd_ralph/prd.json` passed.
 - 2026-04-30: removed generated non-canonical graphify/opencode artifacts from the bootstrap workspace; official context remains under `.context/docs`, `.context/prd_ralph`, and `.context/workflow`.
+- 2026-04-30: operational sync attempt connected to Zotero API and found 827 API attachments, 794 unique attachment names, and 451 PDFs in `/home/lucas/Koofr WebDAV GDrive/zoterodb`.
+- 2026-04-30: pre-sync diagnostic found 4 duplicate attachment groups and 61 WebDAV PDFs without Zotero filename match before sync.
+- 2026-04-30: `findmnt -T /home/lucas/Koofr WebDAV GDrive/zoterodb` showed `fuse.rclone` mount from `Koofr WebDAV GDrive:`.
+- 2026-04-30: reading content from the mount stalled: a 1.11 MiB PDF did not hash within 45s, and `rclone cat --head 65536` returned `unexpected EOF` for sampled PDFs.
+- 2026-04-30: lazy-unmounted and restarted the rclone mount with the observed mount command, but sampled remote reads still failed with `unexpected EOF`.
+- 2026-04-30: added `ZOTERO_CONTENT_PROBE_TIMEOUT_SECONDS` and per-file/probe logs to `zotero_sync_webdav.py` so future runs abort before the progress bar stalls at `0/451` when the mount cannot deliver file content.
+- 2026-04-30: validation passed: `python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py`.
+- 2026-04-30: probe validation passed locally: `.gitignore` read probe returned `True`; mount probe for `/home/lucas/Koofr WebDAV GDrive/zoterodb/Breve histórico das mudanças na regulação do trabalho no Brasil.pdf` timed out after 5s and returned `False`.
+- 2026-04-30: sync is blocked by the rclone/Koofr content-read failure, not by Zotero API credentials or Zotero DB availability.

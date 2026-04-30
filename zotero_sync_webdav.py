@@ -6,7 +6,10 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import sys
+import time
 import unicodedata
 import logging
 from datetime import datetime, timezone
@@ -114,6 +117,101 @@ MAX_ATTACHMENTS_TO_CHECK = 0  # 0 = todos os anexos do Zotero
 
 # Ativar logs detalhados no console
 DEBUG_DETAILED = True
+HASH_READ_TIMEOUT_SECONDS_DEFAULT = 180
+CONTENT_PROBE_TIMEOUT_SECONDS_DEFAULT = 60
+
+
+def get_env_int(name: str, default: int) -> int:
+    """Lê inteiro de ambiente com fallback seguro."""
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        logging.warning("Valor inválido para %s=%r. Usando %d.", name, raw_value, default)
+        return default
+    return max(0, value)
+
+
+HASH_READ_TIMEOUT_SECONDS = get_env_int(
+    "ZOTERO_HASH_TIMEOUT_SECONDS",
+    HASH_READ_TIMEOUT_SECONDS_DEFAULT,
+)
+CONTENT_PROBE_TIMEOUT_SECONDS = get_env_int(
+    "ZOTERO_CONTENT_PROBE_TIMEOUT_SECONDS",
+    CONTENT_PROBE_TIMEOUT_SECONDS_DEFAULT,
+)
+
+
+def probe_pdf_content_read(
+    path: str,
+    timeout_seconds: int = CONTENT_PROBE_TIMEOUT_SECONDS,
+    bytes_to_read: int = 65536,
+) -> bool:
+    """Testa leitura curta de conteúdo em subprocesso para detectar mount travado."""
+    if not path:
+        return False
+    if timeout_seconds <= 0:
+        logging.info("[PROBE] Probe de conteúdo desativado para '%s'.", path)
+        return True
+
+    logging.info(
+        "[PROBE] Testando leitura inicial de %d bytes de '%s' (timeout=%ss).",
+        bytes_to_read,
+        path,
+        timeout_seconds,
+    )
+    probe_code = (
+        "import sys\n"
+        "path = sys.argv[1]\n"
+        "size = int(sys.argv[2])\n"
+        "with open(path, 'rb') as handle:\n"
+        "    handle.read(size)\n"
+    )
+    started_at = time.monotonic()
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-c", probe_code, path, str(bytes_to_read)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        while True:
+            return_code = process.poll()
+            if return_code is not None:
+                break
+
+            elapsed = time.monotonic() - started_at
+            if elapsed >= timeout_seconds:
+                process.kill()
+                logging.error(
+                    "[PROBE] Timeout após %.1fs lendo '%s'. Processo filho pid=%s pode ficar preso em I/O do mount; abortando o sync.",
+                    elapsed,
+                    path,
+                    process.pid,
+                )
+                return False
+
+            time.sleep(0.2)
+
+        _, stderr = process.communicate()
+        if return_code != 0:
+            logging.error(
+                "[PROBE] Falha ao ler conteúdo de '%s' (rc=%s): %s",
+                path,
+                return_code,
+                (stderr or "").strip(),
+            )
+            return False
+    except OSError as exc:
+        logging.error("[PROBE] Erro ao executar probe de conteúdo para '%s': %s", path, exc)
+        return False
+
+    elapsed = time.monotonic() - started_at
+    logging.info("[PROBE] Leitura inicial OK para '%s' em %.1fs.", path, elapsed)
+    return True
 
 
 def prepare_daily_log_file() -> str | None:
@@ -565,8 +663,12 @@ def rename_cache_entry(cache: Dict[str, dict], old_path: str, new_path: str) -> 
         cache[new_abs] = entry
 
 
-def compute_sha256(path: str, cache: Dict[str, dict] | None = None) -> str | None:
-    """Calcula o hash SHA-256 do arquivo fornecido com suporte a cache."""
+def compute_sha256(
+    path: str,
+    cache: Dict[str, dict] | None = None,
+    timeout_seconds: int | None = None,
+) -> str | None:
+    """Calcula o hash SHA-256 do arquivo fornecido com suporte a cache e timeout."""
     cache_ref = cache if cache is not None else HASH_CACHE
     abspath = _normalize_cache_path(path)
     try:
@@ -578,17 +680,56 @@ def compute_sha256(path: str, cache: Dict[str, dict] | None = None) -> str | Non
     if cache_ref is not None:
         cached = get_cached_hash(abspath, cache_ref, stat)
         if cached:
+            logging.debug("[HASH] Cache hit para '%s'.", path)
             return cached
 
+    effective_timeout = HASH_READ_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    size_mb = stat.st_size / (1024 * 1024)
+    logging.info(
+        "[HASH] Calculando SHA-256 de '%s' (%.1f MiB, timeout=%ss).",
+        path,
+        size_mb,
+        effective_timeout if effective_timeout else "sem",
+    )
+
+    alarm_enabled = False
+    previous_handler = None
+
+    def raise_hash_timeout(signum, frame):
+        raise TimeoutError(f"timeout ao calcular hash de {path}")
+
     try:
+        if effective_timeout and effective_timeout > 0:
+            try:
+                previous_handler = signal.getsignal(signal.SIGALRM)
+                signal.signal(signal.SIGALRM, raise_hash_timeout)
+                signal.alarm(effective_timeout)
+                alarm_enabled = True
+            except ValueError:
+                logging.debug("[HASH] Timeout por SIGALRM indisponível neste contexto.")
+
+        started_at = time.monotonic()
         hasher = hashlib.sha256()
         with open(abspath, "rb") as handle:
             for chunk in iter(lambda: handle.read(65536), b""):
                 hasher.update(chunk)
         file_hash = hasher.hexdigest()
+        elapsed = time.monotonic() - started_at
+        logging.info("[HASH] SHA-256 concluído para '%s' em %.1fs.", path, elapsed)
+    except TimeoutError:
+        logging.error(
+            "[HASH] Timeout após %ss ao calcular SHA-256 de '%s'. Arquivo ignorado nesta execução.",
+            effective_timeout,
+            path,
+        )
+        return None
     except OSError as exc:
         logging.warning("[HASH] Não foi possível calcular hash de '%s': %s", path, exc)
         return None
+    finally:
+        if alarm_enabled:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous_handler)
 
     if cache_ref is not None:
         set_cached_hash(abspath, file_hash, cache_ref, stat)
@@ -871,6 +1012,15 @@ def main():
 
         print(f"Encontrados {stats['folder_total_pdfs']} PDFs. Processando todos.")
 
+        if not probe_pdf_content_read(files_to_process[0]):
+            stats['errors'] += 1
+            logging.error(
+                "[PROBE] Sincronização abortada: o mount não conseguiu ler conteúdo do primeiro PDF. "
+                "Verifique o rclone/Koofr antes de tentar adicionar ou comparar anexos.",
+            )
+            finalize_execution(stats)
+            return
+
         # 4. Processar cada PDF da pasta WebDAV
         #
         # Ordem de verificação para cada arquivo:
@@ -890,13 +1040,16 @@ def main():
         # CASO 5 — Nome encontrado mas não há cópia local (storage vazio para essa key)
         #          → Garante a cópia local sem re-adicionar ao Zotero.
         #
-        # Nota de performance: o hash só é calculado nos casos 2-5 (nome não encontrado
-        # ou storage local ausente), evitando baixar arquivos grandes via WebDAV
-        # quando a comparação por nome já é suficiente.
+        # Nota de performance: hashes podem ser calculados em qualquer caso que precise
+        # confirmar conteúdo, detectar atualização, reconciliar rename ou criar cópia local.
+        # Em mounts FUSE/rclone isso pode ler o PDF inteiro pela rede; logs e timeout ajudam a diferenciar lentidão de travamento.
 
-        for file_path in tqdm(files_to_process, desc="Verificando arquivos locais"):
+        total_files_to_process = len(files_to_process)
+
+        for index, file_path in enumerate(tqdm(files_to_process, desc="Verificando arquivos locais"), start=1):
             stats['processed'] += 1
             file_name = os.path.basename(file_path)
+            logging.info("[LOOP] Processando %d/%d: '%s'.", index, total_files_to_process, file_name)
             norm_local = normalize_filename(file_name)
             norm_local_aggressive = normalize_aggressive(file_name)
 
@@ -915,6 +1068,16 @@ def main():
                     # Temos cópia local — compara hash para detectar atualização de conteúdo
                     local_hash = compute_sha256(local_file)
                     webdav_hash = compute_sha256(file_path)
+
+                    if not local_hash or not webdav_hash:
+                        stats['errors'] += 1
+                        logging.error(
+                            "[HASH] Falha ao comparar hashes de '%s' (local_hash=%s, webdav_hash=%s). Arquivo ignorado.",
+                            file_name,
+                            "ok" if local_hash else "falhou",
+                            "ok" if webdav_hash else "falhou",
+                        )
+                        continue
 
                     if local_hash and webdav_hash and local_hash == webdav_hash:
                         # CASO 1: nome ok, conteúdo igual → já sincronizado
@@ -943,6 +1106,13 @@ def main():
                     # CASO 5: nome encontrado no Zotero mas sem cópia local
                     logging.info("[CASO 5] '%s' existe no Zotero mas sem cópia local. Copiando (key=%s).", file_name, zotero_key)
                     webdav_hash = compute_sha256(file_path)
+                    if not webdav_hash:
+                        stats['errors'] += 1
+                        logging.error(
+                            "[HASH] Não foi possível obter hash de '%s' para recriar cópia local. Arquivo ignorado.",
+                            file_name,
+                        )
+                        continue
                     copy_outcome = copy_to_local_storage(file_path, zotero_key, webdav_hash)
                     if copy_outcome == "copied":
                         stats['local_copies'] += 1
