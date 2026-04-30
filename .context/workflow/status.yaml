@@ -1,0 +1,36 @@
+project:
+  name: "zotero-sync-webdav-hardening"
+  scale: MEDIUM
+  started: "2026-04-30T03:45:53.941Z"
+  current_phase: P
+
+phases:
+  P:
+    status: in_progress
+    started_at: "2026-04-30T03:45:53.941Z"
+  R:
+    status: pending
+  E:
+    status: pending
+  V:
+    status: pending
+  C:
+    status: skipped
+    reason: "Not required for scale MEDIUM"
+
+execution:
+  history:
+    - timestamp: "2026-04-30T03:45:53.941Z"
+      phase: P
+      action: started
+    - timestamp: "2026-04-30T03:45:53.948Z"
+      phase: C
+      action: phase_skipped
+  last_activity: "2026-04-30T03:45:53.948Z"
+  resume_context: "Fase P (Planejamento) em progresso"
+
+settings:
+  autonomous_mode: false
+  require_plan: true
+  require_approval: false
+

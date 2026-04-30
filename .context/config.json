@@ -1,0 +1,8 @@
+{
+  "exclude": [
+    ".git/**",
+    "__pycache__/**",
+    ".env",
+    "GITHUB_TOKEN.txt"
+  ]
+}

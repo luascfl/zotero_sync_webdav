@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "project": "Zotero WebDAV sync hardening",
+  "overview": "Harden the existing Linux automation scripts for Zotero and a mounted WebDAV folder, with the main synchronizer remaining automatic while failures become testable and explicit.",
+  "goals": [
+    "Keep the main Zotero/WebDAV synchronization path automated once configured.",
+    "Make the main synchronizer import-safe so unit tests can exercise helpers without secrets or live API calls.",
+    "Add narrow tests around configuration, path, cache, copy, rename, and failure-reporting behavior.",
+    "Ensure critical failures are visible in logs, final reports, and process outcomes."
+  ],
+  "nonGoals": [
+    "No UI or web application.",
+    "No conversion of support scripts into separate products.",
+    "No cross-platform support beyond Linux with mounted WebDAV in the current cycle.",
+    "No live Zotero API calls in unit tests.",
+    "No manual confirmation prompt in the normal main sync path."
+  ],
+  "successMetrics": [
+    "The main sync module can be imported without required environment variables or a mounted WebDAV folder.",
+    "Unit tests cover the first hardening seam without contacting Zotero.",
+    "Syntax validation passes for all observed Python scripts.",
+    "Final reports and exit behavior distinguish critical failures from successful sync completion."
+  ],
+  "openQuestions": [
+    "Whether future integration tests should use a fake Zotero server or real opt-in credentials.",
+    "Whether the repository should later adopt a package layout after hardening the script boundaries."
+  ],
+  "stack": {
+    "framework": "Python scripts",
+    "hosting": "Local Linux automation with mounted WebDAV",
+    "database": "No database; local JSON hash cache under ~/.cache/zotero_sync_webdav",
+    "auth": "Zotero API key from environment or env file"
+  },
+  "routes": [],
+  "uiNotes": [],
+  "dataModel": [
+    {
+      "entity": "ZoteroAttachment",
+      "fields": ["key", "data.filename", "data.path", "data.dateAdded", "data.parentItem"]
+    },
+    {
+      "entity": "WebDAVPdf",
+      "fields": ["path", "filename", "mtime", "sha256"]
+    },
+    {
+      "entity": "HashCacheEntry",
+      "fields": ["path", "mtime", "size", "sha256"]
+    },
+    {
+      "entity": "RunStats",
+      "fields": ["added", "skipped", "errors", "processed", "local_copies", "hash_matches", "renamed_webdav", "renamed_local", "updated_content"]
+    }
+  ],
+  "importFormat": {
+    "description": "Not applicable. The project processes local PDFs and Zotero API responses rather than importing a user-provided data file.",
+    "example": {}
+  },
+  "rules": [
+    "The main synchronizer remains automatic by default.",
+    "Missing secrets, missing WebDAV mount, copy failures, rename failures, and API failures must not be reported as successful sync completion.",
+    "Unit tests must not require ZOTERO_API_KEY, a live Zotero account, or a mounted WebDAV folder.",
+    "Filesystem mutation helpers must not overwrite existing destination files silently.",
+    "Each Ralph cycle executes exactly one story."
+  ],
+  "qualityGates": [
+    "python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py",
+    "python3 -m unittest discover -s tests"
+  ],
+  "stories": [
+    {
+      "id": "US-001",
+      "title": "Make main sync import-safe and testable",
+      "status": "open",
+      "dependsOn": [],
+      "description": "As a maintainer, I want zotero_sync_webdav.py to be import-safe so tests can exercise pure helpers without secrets, a mounted WebDAV folder, or live Zotero calls.",
+      "acceptanceCriteria": [
+        "Move required-environment validation and runtime-only side effects out of module import and into an explicit runtime path used by main().",
+        "Importing zotero_sync_webdav with no ZOTERO_* environment variables does not raise and does not contact Zotero.",
+        "Example: a unit test can import normalize_filename, normalize_aggressive, resolve_target_folder, and _coerce_response_items without a .env file.",
+        "Negative case: calling the runtime config loader with missing ZOTERO_LIBRARY_ID, ZOTERO_API_KEY, or ZOTERO_SYNC_TARGET_FOLDER returns or raises a clear configuration failure before any Zotero API call.",
+        "Add a tests/ suite using the Python standard library unittest module for import-safety, path resolution, filename normalization, and malformed Zotero response coercion.",
+        "The quality gates pass: python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py and python3 -m unittest discover -s tests."
+      ]
+    },
+    {
+      "id": "US-002",
+      "title": "Test filesystem mutation helpers",
+      "status": "open",
+      "dependsOn": ["US-001"],
+      "description": "As a maintainer, I want copy, rename, and hash-cache helpers covered by temporary-directory tests so file mutation behavior does not regress silently.",
+      "acceptanceCriteria": [
+        "Add unit tests for rename_webdav_file covering successful rename and existing-destination collision.",
+        "Add unit tests for copy_to_local_storage covering copied, exists, and copy-failure outcomes without touching the real ~/Zotero/storage directory.",
+        "Add unit tests for hash cache lookup and cache entry rename using temporary files.",
+        "Example: renaming a WebDAV PDF to an unused canonical name updates the path and cache entry.",
+        "Negative case: when the destination filename already exists, the helper does not overwrite it and returns the original path.",
+        "The quality gates pass."
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "Add automated preflight checks",
+      "status": "open",
+      "dependsOn": ["US-001"],
+      "description": "As an unattended automation user, I want preflight checks to catch missing Linux/WebDAV and local-storage prerequisites before the sync starts mutating Zotero or files.",
+      "acceptanceCriteria": [
+        "Add a preflight function for required config values, WebDAV folder existence, WebDAV readability, local storage writability, and optional desktop tooling availability.",
+        "The preflight keeps the main sync automatic; it fails fast with a clear error instead of asking for confirmation.",
+        "Example: a mounted readable WebDAV directory and writable local storage allow the sync to proceed.",
+        "Negative case: a missing target folder stops before Zotero attachment creation or file rename/copy operations.",
+        "Add unit tests for pass and fail preflight cases using temporary directories.",
+        "The quality gates pass."
+      ]
+    },
+    {
+      "id": "US-004",
+      "title": "Make run outcome truthful",
+      "status": "open",
+      "dependsOn": ["US-001"],
+      "description": "As an operator, I want the script's final report and process result to clearly distinguish completed syncs from critical failures.",
+      "acceptanceCriteria": [
+        "Define critical failures for missing config, failed Zotero connection, missing target folder, failed attachment add, failed copy when required, and unexpected processing exceptions.",
+        "Ensure main() returns an explicit status or exits nonzero for critical failure while preserving a successful zero-exit path for completed runs.",
+        "Example: when Zotero connection fails, the final output records the failure and the process exits nonzero.",
+        "Negative case: a run with zero PDFs in an existing target folder exits successfully and reports no work rather than failure.",
+        "Add tests for success, no-work, and critical-failure outcome mapping without live Zotero calls.",
+        "The quality gates pass."
+      ]
+    }
+  ]
+}
