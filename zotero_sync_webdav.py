@@ -22,10 +22,13 @@ Workflow real deste script:
      ao Zotero e também copiado para ~/Zotero/storage;
    - caso 5: o Zotero conhece o anexo, mas a cópia local em ~/Zotero/storage está
      ausente, então a cópia local é recriada a partir do drive.
+6. Após a varredura do drive, reconcilia Zotero -> drive: anexos PDF que existem
+   no Zotero e não têm correspondente no drive são materializados no drive a partir
+   da cópia local ou, se ela faltar, baixados da API do Zotero primeiro.
 
 Regras operacionais definidas pelo usuário para conflitos:
 - presença é bidirecional: drive sem Zotero deve ir para o Zotero; Zotero sem drive
-  deve ser materializado no drive em uma futura etapa de reconciliação completa;
+  deve ser materializado no drive automaticamente;
 - em hash_match com nomes diferentes, o lado com mtime mais recente vira a fonte de
   verdade temporária para o título;
 - se o Zotero estiver mais recente, renomeia-se o drive;
@@ -33,10 +36,8 @@ Regras operacionais definidas pelo usuário para conflitos:
   porque esse foi o ajuste manual mais recente do usuário.
 
 Limites atuais importantes:
-- a implementação já cobre bem a direção drive -> Zotero e a reconstrução da cópia
-  local do Zotero;
-- a presença Zotero -> drive ainda não é uma reconciliação global completa, apesar de
-  a política do projeto já exigir isso;
+- a reconciliação bidirecional cobre nomes, hashes, cópia local e materialização de
+  PDFs do Zotero para o drive;
 - mounts FUSE/rclone podem listar arquivos mas travar na leitura do conteúdo, então o
   script faz probes e usa timeouts para distinguir lentidão de mount quebrado.
 """
@@ -70,7 +71,7 @@ PROJECT_ENV_FILE = SCRIPT_DIR / ".env"
 env_file_from_env = os.environ.get("ZOTERO_ENV_FILE")
 
 
-def load_env_file(env_path: os.PathLike[str] | str) -> None:
+def load_env_file(env_path: os.PathLike[str] | str, override: bool = False) -> None:
     """Carrega variáveis de ambiente a partir de um arquivo .env simples."""
     if not env_path:
         return
@@ -85,19 +86,19 @@ def load_env_file(env_path: os.PathLike[str] | str) -> None:
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
+            if key and (override or key not in os.environ):
                 os.environ[key] = value
     except OSError as exc:
         logging.warning("Falha ao carregar variáveis do arquivo %s: %s", env_file, exc)
 
 
 if env_file_from_env:
-    load_env_file(env_file_from_env)
+    load_env_file(env_file_from_env, override=True)
 else:
     # Prioriza a configuração operacional do serviço/autostart. O .env do projeto fica
-    # como fallback local para desenvolvimento e não deve sobrescrever variáveis já carregadas.
-    load_env_file(CONFIG_ENV_FILE)
-    load_env_file(PROJECT_ENV_FILE)
+    # como fallback local para desenvolvimento e não deve sobrescrever a configuração operacional.
+    load_env_file(CONFIG_ENV_FILE, override=True)
+    load_env_file(PROJECT_ENV_FILE, override=False)
 
 # --- Configuração Final (via .env / variáveis de ambiente) ---
 LIBRARY_ID = os.environ.get("ZOTERO_LIBRARY_ID")
@@ -1431,6 +1432,211 @@ def copy_to_local_storage(src_path: str, attachment_key: str, known_hash: str | 
         return None
 
 
+def set_mtime_from_zotero_date(path: str, date_modified: str | None) -> None:
+    """Alinha o mtime de uma cópia materializada com o dateModified do Zotero."""
+    parsed = parse_zotero_date(date_modified or "")
+    if not parsed:
+        return
+    timestamp = parsed.timestamp()
+    try:
+        os.utime(path, (timestamp, timestamp))
+    except OSError as exc:
+        logging.warning("[ZOT->DRIVE] Não foi possível ajustar mtime de '%s': %s", path, exc)
+
+
+def download_zotero_attachment_to_local(
+    zot: zotero.Zotero,
+    item: dict,
+    filename: str,
+    ) -> str | None:
+    """Baixa o arquivo do anexo Zotero para ~/Zotero/storage/<key>/ quando a cópia local falta."""
+    key = item.get('key')
+    if not key or not filename:
+        return None
+
+    dest_dir = os.path.join(LOCAL_COPY_DIR, key)
+    dest_file = os.path.join(dest_dir, os.path.basename(filename))
+    if os.path.exists(dest_file):
+        return dest_file
+
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        zot.dump(key, filename=os.path.basename(filename), path=dest_dir)
+    except Exception as exc:
+        logging.warning("[ZOT->DRIVE] Falha ao baixar anexo %s do Zotero: %s", key, exc)
+        return None
+
+    if not os.path.exists(dest_file):
+        logging.warning("[ZOT->DRIVE] Download do anexo %s não gerou o arquivo esperado: %s", key, dest_file)
+        return None
+
+    data = item.get('data', {})
+    set_mtime_from_zotero_date(dest_file, data.get('dateModified'))
+    compute_sha256(dest_file)
+    logging.info("[ZOT->DRIVE] Anexo %s baixado para cópia local: %s", key, dest_file)
+    return dest_file
+
+
+def build_drive_pdf_index(directory: str, stats: dict | None = None) -> tuple[dict, dict, dict]:
+    """Indexa PDFs atuais do drive por nome normalizado e hash."""
+    name_index: dict[str, str] = {}
+    aggressive_index: dict[str, str] = {}
+    hash_index: dict[str, list[dict]] = {}
+
+    temp_stats = {'folder_total_pdfs': 0, 'folder_checked_pdfs': 0}
+    for path in collect_all_pdfs(directory, temp_stats):
+        filename = os.path.basename(path)
+        norm = normalize_filename(filename)
+        norm_aggressive = normalize_aggressive(filename)
+        if norm and norm not in name_index:
+            name_index[norm] = path
+        if norm_aggressive and norm_aggressive not in aggressive_index:
+            aggressive_index[norm_aggressive] = path
+
+        file_hash = compute_sha256(path)
+        if not file_hash:
+            if stats is not None:
+                stats['errors'] += 1
+            logging.warning("[ZOT->DRIVE] Não foi possível hashear arquivo do drive durante índice final: %s", path)
+            continue
+
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        hash_index.setdefault(file_hash, []).append({
+            'path': path,
+            'filename': filename,
+            'mtime': mtime,
+        })
+
+    logging.info(
+        "[ZOT->DRIVE] Índice final do drive: %d nomes | %d hashes únicos.",
+        len(name_index),
+        len(hash_index),
+    )
+    return name_index, aggressive_index, hash_index
+
+
+def materialize_zotero_attachments_to_drive(
+    zot: zotero.Zotero,
+    attachments: List[dict],
+    drive_name_index: dict,
+    drive_aggressive_index: dict,
+    drive_hash_index: dict,
+    key_to_path: Dict[str, str],
+    stats: dict,
+    tie_conflicts: list[dict[str, str]],
+    ) -> None:
+    """Materializa no drive PDFs conhecidos pelo Zotero que não existem no drive."""
+    seen_keys: set[str] = set()
+
+    for item in attachments:
+        data = item.get('data', {})
+        key = item.get('key')
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+
+        filename = get_filename_from_item(item)
+        if not filename or not filename.lower().endswith('.pdf'):
+            continue
+        filename = os.path.basename(filename)
+
+        norm = normalize_filename(filename)
+        norm_aggressive = normalize_aggressive(filename)
+        if (norm and norm in drive_name_index) or (norm_aggressive and norm_aggressive in drive_aggressive_index):
+            continue
+
+        local_path = key_to_path.get(key) or get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, key))
+        if not local_path or not os.path.exists(local_path):
+            local_path = download_zotero_attachment_to_local(zot, item, filename)
+            if local_path:
+                stats['downloaded_zotero'] += 1
+                stats['local_copies'] += 1
+
+        if not local_path or not os.path.exists(local_path):
+            stats['errors'] += 1
+            logging.warning(
+                "[ZOT->DRIVE] Anexo %s existe no Zotero, mas não há arquivo local nem download disponível. Não materializado.",
+                key,
+            )
+            continue
+
+        local_hash = compute_sha256(local_path)
+        if not local_hash:
+            stats['errors'] += 1
+            logging.warning("[ZOT->DRIVE] Não foi possível calcular hash da origem local para anexo %s.", key)
+            continue
+
+        hash_matches = drive_hash_index.get(local_hash, [])
+        if hash_matches:
+            drive_entry = max(hash_matches, key=lambda entry: entry.get('mtime', 0.0))
+            drive_path = drive_entry['path']
+            drive_name = drive_entry['filename']
+            drive_mtime = drive_entry.get('mtime', 0.0)
+            zotero_date_modified = parse_zotero_date(data.get('dateModified', ''))
+            zotero_mtime = zotero_date_modified.timestamp() if zotero_date_modified else os.path.getmtime(local_path)
+
+            if drive_name == filename:
+                continue
+
+            if zotero_mtime > drive_mtime:
+                new_path = rename_webdav_file(drive_path, filename)
+                if new_path != drive_path:
+                    stats['renamed_webdav'] += 1
+                    drive_entry['path'] = new_path
+                    drive_entry['filename'] = filename
+                    drive_entry['mtime'] = os.path.getmtime(new_path)
+                    drive_name_index[norm] = new_path
+                    drive_aggressive_index[norm_aggressive] = new_path
+                    logging.info("[ZOT->DRIVE] Drive renomeado pelo Zotero mais recente: '%s'.", filename)
+            elif drive_mtime > zotero_mtime:
+                updated_path = rename_local_attachment(zot, key, local_path, drive_name)
+                if updated_path != local_path:
+                    key_to_path[key] = updated_path
+                    stats['renamed_local'] += 1
+                    logging.info("[ZOT->DRIVE] Zotero atualizado pelo drive mais recente: '%s'.", drive_name)
+            else:
+                stats['mtime_ties'] += 1
+                tie_conflicts.append({
+                    'key': key,
+                    'drive_name': drive_name,
+                    'zotero_name': filename,
+                })
+                logging.warning("[ZOT->DRIVE] Empate de mtime entre drive e Zotero para key=%s.", key)
+            continue
+
+        dest_path = os.path.join(TARGET_FOLDER, filename)
+        if os.path.exists(dest_path):
+            dest_hash = compute_sha256(dest_path)
+            if dest_hash and dest_hash == local_hash:
+                logging.info("[ZOT->DRIVE] '%s' já existe no drive com mesmo hash.", filename)
+                continue
+            stats['errors'] += 1
+            logging.warning(
+                "[ZOT->DRIVE] Destino já existe com conteúdo diferente. Não sobrescrito: %s",
+                dest_path,
+            )
+            continue
+
+        try:
+            shutil.copy2(local_path, dest_path)
+            set_mtime_from_zotero_date(dest_path, data.get('dateModified'))
+            set_cached_hash(dest_path, local_hash, HASH_CACHE)
+            drive_name_index[norm] = dest_path
+            drive_aggressive_index[norm_aggressive] = dest_path
+            drive_hash_index.setdefault(local_hash, []).append({
+                'path': dest_path,
+                'filename': filename,
+                'mtime': os.path.getmtime(dest_path),
+            })
+            stats['materialized_drive'] += 1
+            logging.info("[ZOT->DRIVE] Anexo %s materializado no drive: %s", key, dest_path)
+        except Exception as exc:
+            stats['errors'] += 1
+            logging.error("[ZOT->DRIVE] Falha ao materializar anexo %s em '%s': %s", key, dest_path, exc)
+
 def build_cli_parser() -> argparse.ArgumentParser:
     """Constrói a CLI unificada do workflow Zotero/WebDAV."""
     parser = argparse.ArgumentParser(
@@ -1484,6 +1690,8 @@ def run_sync_mode():
         'updated_content': 0,
         'mtime_ties': 0,
         'pruned_drive_duplicates': 0,
+        'materialized_drive': 0,
+        'downloaded_zotero': 0,
     }
     tie_conflicts: list[dict[str, str]] = []
 
@@ -1833,6 +2041,19 @@ def run_sync_mode():
                 logging.error("[ERRO] Exceção ao adicionar '%s': %s", file_name, e)
                 cleanup_failed_attachment_upload(zot, file_path)
 
+
+        logging.info("[ZOT->DRIVE] Iniciando reconciliação Zotero -> drive para anexos ausentes.")
+        drive_name_index, drive_aggressive_index, drive_hash_index = build_drive_pdf_index(TARGET_FOLDER, stats)
+        materialize_zotero_attachments_to_drive(
+            zot,
+            all_attachments,
+            drive_name_index,
+            drive_aggressive_index,
+            drive_hash_index,
+            key_to_path,
+            stats,
+            tie_conflicts,
+        )
     except Exception as e:
         logging.error(f"Erro ao processar arquivos da pasta: {e}")
         finalize_execution(stats)
@@ -1879,6 +2100,8 @@ def run_sync_mode():
 │ ✏️  Renomes WebDAV: {stats['renamed_webdav']:<27} │
 │ 📝 Renomes storage: {stats['renamed_local']:<27} │
 │ 🧹 Duplicados removidos: {stats['pruned_drive_duplicates']:<22} │
+│ ⬇️  Baixados do Zotero: {stats['downloaded_zotero']:<24} │
+│ 📤 Materializados no drive: {stats['materialized_drive']:<20} │
 │ ⚖️  Empates de mtime: {stats['mtime_ties']:<25} │
 └──────────────────────────────────────────────────────┘
 {tie_summary}
