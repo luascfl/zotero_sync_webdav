@@ -24,3 +24,9 @@ python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_
 ```
 
 If tests are added, also run the narrow test command added by the story.
+
+The main script now exposes integrated operational modes:
+- `python3 zotero_sync_webdav.py sync` or no args
+- `python3 zotero_sync_webdav.py diagnostico`
+- `python3 zotero_sync_webdav.py remove-duplicatas [--executar]`
+- `python3 zotero_sync_webdav.py setup-autostart`

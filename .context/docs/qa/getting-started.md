@@ -39,7 +39,11 @@ OBSIDIAN_ZOTERO_MIRROR_ROOT=/path/to/ObsidianLocal
   ```
 - Run diagnostics:
   ```bash
-  python3 zotero_diagnostico.py
+  python3 zotero_sync_webdav.py diagnostico
+  ```
+- Configure autostart:
+  ```bash
+  python3 zotero_sync_webdav.py setup-autostart
   ```
 - Mirror Zotero collections to Obsidian folders in dry-run mode:
   ```bash

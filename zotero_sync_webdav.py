@@ -41,10 +41,12 @@ Limites atuais importantes:
   script faz probes e usa timeouts para distinguir lentidão de mount quebrado.
 """
 
+import argparse
 import atexit
 import hashlib
 import heapq
 import json
+import logging
 import os
 import re
 import shlex
@@ -54,7 +56,6 @@ import subprocess
 import sys
 import time
 import unicodedata
-import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -652,6 +653,261 @@ def collect_all_attachments(
     return all_items, existing_filenames, existing_filenames_aggressive
 
 
+def build_duplicate_groups(attachments: List[dict]) -> List[dict]:
+    """Agrupa anexos PDF duplicados por nome normalizado."""
+    by_basic: Dict[str, List[dict]] = {}
+    by_aggressive: Dict[str, List[dict]] = {}
+
+    def push(bucket: Dict[str, List[dict]], norm_name: str, info: dict) -> None:
+        bucket.setdefault(norm_name, []).append(info)
+
+    for item in attachments:
+        filename = get_filename_from_item(item)
+        if not filename or not filename.lower().endswith('.pdf'):
+            continue
+        data = item.get('data', {})
+        info = {
+            'key': item.get('key', '?'),
+            'filename': filename,
+            'dateAdded': data.get('dateAdded', '?'),
+            'parentItem': data.get('parentItem', ''),
+        }
+        norm_basic = normalize_filename(filename)
+        norm_aggressive = normalize_aggressive(filename)
+        if norm_basic:
+            push(by_basic, norm_basic, info)
+        if norm_aggressive and norm_aggressive != norm_basic:
+            push(by_aggressive, norm_aggressive, info)
+
+    groups: List[dict] = []
+    seen_key_pairs: set[frozenset[str]] = set()
+
+    def add_group(norm_name: str, items: List[dict], method: str) -> None:
+        keys = frozenset(entry['key'] for entry in items)
+        if len(keys) < 2 or keys in seen_key_pairs:
+            return
+        seen_key_pairs.add(keys)
+        sorted_items = sorted(items, key=lambda entry: entry['dateAdded'])
+        groups.append({
+            'norm': norm_name,
+            'method': method,
+            'items': sorted_items,
+            'keeper': sorted_items[0],
+            'to_delete': sorted_items[1:],
+        })
+
+    for norm_name, items in by_basic.items():
+        add_group(norm_name, items, 'nome normalizado')
+    for norm_name, items in by_aggressive.items():
+        add_group(norm_name, items, 'nome agressivo')
+
+    return groups
+
+
+def find_missing_drive_pdfs_in_zotero(
+    attachments: List[dict],
+    folder: str,
+    ) -> dict:
+    """Lista PDFs do drive que ainda não têm correspondência nominal no Zotero."""
+    zotero_names_basic: set[str] = set()
+    zotero_names_aggressive: set[str] = set()
+
+    for item in attachments:
+        filename = get_filename_from_item(item)
+        if not filename:
+            continue
+        zotero_names_basic.add(normalize_filename(filename))
+        zotero_names_aggressive.add(normalize_aggressive(filename))
+
+    missing: List[dict] = []
+    errors: List[str] = []
+    if not os.path.isdir(folder):
+        return {'missing': [], 'errors': [f'Pasta não encontrada: {folder}'], 'folder': folder}
+
+    try:
+        pdf_entries = [
+            entry for entry in os.scandir(folder)
+            if entry.is_file() and entry.name.lower().endswith('.pdf')
+        ]
+    except OSError as exc:
+        return {'missing': [], 'errors': [f'Falha ao ler pasta {folder}: {exc}'], 'folder': folder}
+
+    for entry in pdf_entries:
+        norm_basic = normalize_filename(entry.name)
+        norm_aggressive = normalize_aggressive(entry.name)
+        if norm_basic in zotero_names_basic or norm_aggressive in zotero_names_aggressive:
+            continue
+        try:
+            size_kb = entry.stat().st_size // 1024
+        except OSError:
+            size_kb = -1
+        missing.append({'filename': entry.name, 'path': entry.path, 'size_kb': size_kb})
+
+    return {
+        'missing': missing,
+        'errors': errors,
+        'folder': folder,
+        'total_pdfs': len(pdf_entries),
+        'total_missing': len(missing),
+    }
+
+
+def print_diagnostic_report(duplicate_groups: List[dict], missing_result: dict) -> None:
+    print(f"\n{'═'*60}")
+    print('  RELATÓRIO DE DIAGNÓSTICO ZOTERO')
+    print(f"{'═'*60}")
+
+    print(f"\n{'━'*60}")
+    print(f"  1. ANEXOS DUPLICADOS  ({len(duplicate_groups)} grupo(s))")
+    print(f"{'━'*60}")
+    if not duplicate_groups:
+        print('  ✅ Nenhuma duplicata encontrada.')
+    else:
+        for index, group in enumerate(duplicate_groups, start=1):
+            print(f"\n  Grupo #{index}  [{group['method']}]  norm='{group['norm']}'")
+            for item in group['items']:
+                parent = f"  parent={item['parentItem']}" if item['parentItem'] else '  (sem pai)'
+                print(f"    • key={item['key']}  dateAdded={item['dateAdded']}")
+                print(f"      filename='{item['filename']}'{parent}")
+
+    print(f"\n{'━'*60}")
+    print('  2. PDFs SEM CORRESPONDÊNCIA NO ZOTERO')
+    print(f"     Pasta: {missing_result['folder']}")
+    print(f"     Total PDFs: {missing_result.get('total_pdfs', '?')}  |  Ausentes: {missing_result.get('total_missing', '?')}")
+    print(f"{'━'*60}")
+    for error in missing_result.get('errors', []):
+        print(f'  ⚠️  {error}')
+    if not missing_result.get('missing'):
+        print('  ✅ Todos os PDFs da pasta já estão no Zotero.')
+    else:
+        for item in missing_result['missing']:
+            print(f"  • {item['filename']}  ({item['size_kb']} KB)")
+            print(f"    {item['path']}")
+    print(f"\n{'═'*60}\n")
+
+
+def delete_attachment_keys(zot: zotero.Zotero, keys: List[str], dry_run: bool) -> tuple[int, int]:
+    """Remove anexos pela chave, com dry-run opcional."""
+    deleted_ok = 0
+    deleted_err = 0
+    for key in keys:
+        if dry_run:
+            print(f'    [DRY-RUN] Deletaria key={key}')
+            deleted_ok += 1
+            continue
+        try:
+            item = zot.item(key)
+            zot.delete_item(item)
+            print(f'    ✅ Deletado: key={key}')
+            deleted_ok += 1
+            time.sleep(0.3)
+        except Exception as exc:
+            print(f'    ❌ Falha ao deletar key={key}: {exc}')
+            deleted_err += 1
+    return deleted_ok, deleted_err
+
+
+def connect_zotero_client() -> zotero.Zotero:
+    """Conecta na API do Zotero usando a configuração ativa."""
+    client = zotero.Zotero(LIBRARY_ID, LIBRARY_TYPE, API_KEY)
+    client.key_info()
+    return client
+
+
+def run_diagnostic_mode() -> None:
+    print(f'🔗 Conectando ao Zotero (library_id={LIBRARY_ID}, type={LIBRARY_TYPE})...')
+    try:
+        client = connect_zotero_client()
+        print('✅ Conexão OK.')
+    except Exception as exc:
+        raise SystemExit(f'❌ Falha na conexão: {exc}')
+
+    print('\n📥 Buscando TODOS os anexos da biblioteca...')
+    attachments, _, _ = collect_all_attachments(client, {'zotero_attachments_scanned': 0})
+    print('\n🔍 Verificando duplicatas...')
+    duplicate_groups = build_duplicate_groups(attachments)
+    print(f"\n📂 Verificando PDFs ausentes no Zotero (pasta: {TARGET_FOLDER})...")
+    missing_result = find_missing_drive_pdfs_in_zotero(attachments, TARGET_FOLDER)
+    print_diagnostic_report(duplicate_groups, missing_result)
+
+
+def run_duplicate_cleanup_mode(execute: bool) -> None:
+    dry_run = not execute
+    mode_label = '🔍 DRY-RUN (simulação)' if dry_run else '⚠️  MODO REAL (vai deletar)'
+    print(f"\n{'═'*60}")
+    print(f'  REMOÇÃO DE DUPLICATAS ZOTERO  —  {mode_label}')
+    print(f'  library_id={LIBRARY_ID}, type={LIBRARY_TYPE}')
+    print(f"{'═'*60}\n")
+
+    if not dry_run:
+        print("⚠️  ATENÇÃO: você está prestes a deletar anexos da sua biblioteca Zotero.")
+        print('   Esta operação é IRREVERSÍVEL pela API.')
+        confirm = input("   Digite 'sim' para continuar: ").strip().lower()
+        if confirm not in ('sim', 's', 'yes', 'y'):
+            print('Operação cancelada.')
+            return
+        print()
+
+    print('🔗 Conectando ao Zotero...')
+    try:
+        client = connect_zotero_client()
+        print('✅ Conexão OK.\n')
+    except Exception as exc:
+        raise SystemExit(f'❌ Falha na conexão: {exc}')
+
+    print('📥 Buscando todos os anexos...')
+    attachments, _, _ = collect_all_attachments(client, {'zotero_attachments_scanned': 0})
+    print('\n🔍 Detectando duplicatas de PDFs...')
+    groups = build_duplicate_groups(attachments)
+
+    if not groups:
+        print('\n✅ Nenhuma duplicata de PDF encontrada. Nada a fazer.')
+        return
+
+    total_to_delete = sum(len(group['to_delete']) for group in groups)
+    print(f"\nEncontrados {len(groups)} grupo(s) de duplicatas → {total_to_delete} anexo(s) a remover.\n")
+
+    deleted_ok = 0
+    deleted_err = 0
+    for index, group in enumerate(groups, start=1):
+        keeper = group['keeper']
+        print(f"  Grupo #{index}  [{group['method']}]")
+        print(f"  Arquivo: '{keeper['filename']}'")
+        print(
+            f"  ✔ Mantendo: key={keeper['key']}  dateAdded={keeper['dateAdded']}"
+            f"  parent={keeper['parentItem'] or '(sem pai)'}"
+        )
+        for item in group['to_delete']:
+            print(
+                f"  ✗ Removendo: key={item['key']}  dateAdded={item['dateAdded']}"
+                f"  parent={item['parentItem'] or '(sem pai)'}"
+            )
+        keys_to_delete = [item['key'] for item in group['to_delete']]
+        ok, err = delete_attachment_keys(client, keys_to_delete, dry_run=dry_run)
+        deleted_ok += ok
+        deleted_err += err
+        print()
+
+    print(f"{'═'*60}")
+    if dry_run:
+        print('  DRY-RUN concluído.')
+        print(f'  {deleted_ok} anexo(s) seriam deletados.')
+        print('\n  Para executar de verdade, rode:')
+        print(f'    python3 {Path(__file__).name} remove-duplicatas --executar')
+    else:
+        print(f'  Concluído: {deleted_ok} deletado(s) | {deleted_err} erro(s).')
+    print(f"{'═'*60}\n")
+
+
+def run_setup_autostart_mode(extra_args: List[str]) -> None:
+    """Executa o configurador de autostart a partir do entrypoint principal."""
+    script_path = SCRIPT_DIR / 'setup_autostart.sh'
+    if not script_path.is_file():
+        raise SystemExit(f'❌ Script de setup não encontrado: {script_path}')
+    cmd = ['bash', str(script_path), Path(__file__).name, *extra_args]
+    raise SystemExit(subprocess.run(cmd, check=False).returncode)
+
+
 def _coerce_response_items(items):
     """Normaliza estruturas retornadas pela Pyzotero em listas de anexos."""
     if not items:
@@ -1160,9 +1416,40 @@ def copy_to_local_storage(src_path: str, attachment_key: str, known_hash: str | 
         return None
 
 
-def main():
-    """Executa a sincronização observando API do Zotero, drive montado e storage local.
-"""
+def build_cli_parser() -> argparse.ArgumentParser:
+    """Constrói a CLI unificada do workflow Zotero/WebDAV."""
+    parser = argparse.ArgumentParser(
+        description='Entry point unificado do workflow Zotero/WebDAV',
+    )
+    subparsers = parser.add_subparsers(dest='command')
+
+    subparsers.add_parser('sync', help='Executa a sincronização principal')
+    subparsers.add_parser('diagnostico', help='Roda o diagnóstico de duplicatas e ausências')
+
+    remove_parser = subparsers.add_parser(
+        'remove-duplicatas',
+        help='Detecta e remove duplicatas na biblioteca Zotero',
+    )
+    remove_parser.add_argument(
+        '--executar',
+        action='store_true',
+        help='Apaga de verdade os anexos duplicados',
+    )
+
+    setup_parser = subparsers.add_parser(
+        'setup-autostart',
+        help='Executa o configurador de autostart integrado',
+    )
+    setup_parser.add_argument(
+        'setup_args',
+        nargs=argparse.REMAINDER,
+        help='Argumentos extras repassados ao configurador legado',
+    )
+    return parser
+
+
+def run_sync_mode():
+    """Executa a sincronização observando API do Zotero, drive montado e storage local."""
     configure_pyzotero_upload_transport()
     print("Iniciando o sincronizador Zotero/WebDAV (v2.0)")
 
@@ -1577,6 +1864,26 @@ def main():
 """
     print(summary)
     finalize_execution(stats, summary)
+
+
+def main(argv: List[str] | None = None) -> None:
+    parser = build_cli_parser()
+    args = parser.parse_args(argv)
+
+    if args.command in (None, 'sync'):
+        run_sync_mode()
+        return
+    if args.command == 'diagnostico':
+        run_diagnostic_mode()
+        return
+    if args.command == 'remove-duplicatas':
+        run_duplicate_cleanup_mode(execute=args.executar)
+        return
+    if args.command == 'setup-autostart':
+        run_setup_autostart_mode(args.setup_args)
+        return
+
+    parser.error(f'Comando não suportado: {args.command}')
 
 
 if __name__ == "__main__":

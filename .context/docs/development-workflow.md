@@ -28,15 +28,19 @@ Use the GSD plus Ralph workflow for changes. GSD defines milestones and dependen
   ```
 - Diagnostics:
   ```bash
-  python3 zotero_diagnostico.py
+  python3 zotero_sync_webdav.py diagnostico
   ```
 - Duplicate cleanup dry run:
   ```bash
-  python3 zotero_remove_duplicatas.py
+  python3 zotero_sync_webdav.py remove-duplicatas
   ```
 - Duplicate cleanup real run:
   ```bash
-  python3 zotero_remove_duplicatas.py --executar
+  python3 zotero_sync_webdav.py remove-duplicatas --executar
+  ```
+- Setup autostart:
+  ```bash
+  python3 zotero_sync_webdav.py setup-autostart
   ```
 - Obsidian mirror dry run:
   ```bash

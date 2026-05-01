@@ -21,15 +21,19 @@ This repository contains automation scripts for a personal Linux Zotero/WebDAV w
   ```
 - Diagnostics:
   ```bash
-  python3 zotero_diagnostico.py
+  python3 zotero_sync_webdav.py diagnostico
   ```
 - Duplicate removal dry run:
   ```bash
-  python3 zotero_remove_duplicatas.py
+  python3 zotero_sync_webdav.py remove-duplicatas
   ```
 - Duplicate removal real run:
   ```bash
-  python3 zotero_remove_duplicatas.py --executar
+  python3 zotero_sync_webdav.py remove-duplicatas --executar
+  ```
+- Setup autostart:
+  ```bash
+  python3 zotero_sync_webdav.py setup-autostart
   ```
 - Obsidian mirror dry run:
   ```bash
