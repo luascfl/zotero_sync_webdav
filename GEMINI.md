@@ -20,13 +20,13 @@ Gemini is the implementation executor for closed Ralph stories in this repositor
 Run the story-specific commands first. At minimum, keep this syntax gate passing:
 
 ```bash
-python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py
+python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
 ```
-
-If tests are added, also run the narrow test command added by the story.
 
 The main script now exposes integrated operational modes:
 - `python3 zotero_sync_webdav.py sync` or no args
 - `python3 zotero_sync_webdav.py diagnostico`
 - `python3 zotero_sync_webdav.py remove-duplicatas [--executar]`
 - `python3 zotero_sync_webdav.py setup-autostart`
+
+If tests are added, also run the narrow test command added by the story.

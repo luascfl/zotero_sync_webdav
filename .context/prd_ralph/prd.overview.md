@@ -4,7 +4,7 @@
 - Stories: 4 total (4 open, 0 in_progress, 0 done)
 
 ## Quality Gates
-- python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py
+- python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
 - python3 -m unittest discover -s tests
 
 ## Stories

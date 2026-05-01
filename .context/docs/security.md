@@ -30,5 +30,5 @@ This project handles personal Zotero library access, local files, and a mounted 
 If an automated sync produces unexpected mutations:
 1. Stop the autostart or scheduled runner.
 2. Preserve the daily log under `~/.cache/zotero_sync_webdav/logs`.
-3. Run `python3 zotero_diagnostico.py` to compare Zotero and WebDAV state.
+3. Run `python3 zotero_sync_webdav.py diagnostico` to compare Zotero and WebDAV state.
 4. Do not run duplicate deletion until the diagnostic output has been reviewed.

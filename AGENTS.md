@@ -11,9 +11,9 @@ This repository contains automation scripts for a personal Linux Zotero/WebDAV w
 - Secrets belong in `.env` or `~/.config/zotero_sync_webdav/zotero_sync.env`. Never commit secrets.
 
 ## Current commands
-- Syntax check all scripts:
+- Syntax check active scripts:
   ```bash
-  python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py
+  python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
   ```
 - Main sync:
   ```bash

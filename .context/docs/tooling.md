@@ -21,7 +21,7 @@ The project is intentionally lightweight. Tooling should improve reliability wit
 ## Recommended automation
 - Keep a syntax gate available:
   ```bash
-  python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py
+  python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
   ```
 - After tests are introduced:
   ```bash

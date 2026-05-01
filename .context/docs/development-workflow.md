@@ -20,7 +20,7 @@ Use the GSD plus Ralph workflow for changes. GSD defines milestones and dependen
 ## Local development
 - Syntax gate:
   ```bash
-  python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py
+  python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
   ```
 - Main sync:
   ```bash

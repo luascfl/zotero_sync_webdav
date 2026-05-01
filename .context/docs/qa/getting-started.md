@@ -31,7 +31,7 @@ OBSIDIAN_ZOTERO_MIRROR_ROOT=/path/to/ObsidianLocal
 ## Run commands
 - Validate syntax:
   ```bash
-  python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py
+  python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
   ```
 - Run the main sync:
   ```bash

@@ -63,7 +63,7 @@
     "Each Ralph cycle executes exactly one story."
   ],
   "qualityGates": [
-    "python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py",
+    "python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py",
     "python3 -m unittest discover -s tests"
   ],
   "stories": [
@@ -79,7 +79,7 @@
         "Example: a unit test can import normalize_filename, normalize_aggressive, resolve_target_folder, and _coerce_response_items without a .env file.",
         "Negative case: calling the runtime config loader with missing ZOTERO_LIBRARY_ID, ZOTERO_API_KEY, or ZOTERO_SYNC_TARGET_FOLDER returns or raises a clear configuration failure before any Zotero API call.",
         "Add a tests/ suite using the Python standard library unittest module for import-safety, path resolution, filename normalization, and malformed Zotero response coercion.",
-        "The quality gates pass: python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py and python3 -m unittest discover -s tests."
+        "The quality gates pass: python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py and python3 -m unittest discover -s tests."
       ]
     },
     {

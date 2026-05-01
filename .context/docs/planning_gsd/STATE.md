@@ -19,7 +19,7 @@ Milestone 0: governance bootstrap.
 - PRD JSON: created and JSON-validated at `.context/prd_ralph/prd.json`.
 - GSD project plan: created at `.context/docs/planning_gsd/PROJECT.md`.
 - Workflow status: initialized at `.context/workflow/status.yaml` with current phase P.
-- Syntax validation: `python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py` passed on 2026-04-30.
+- Syntax validation: `python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py` passed on 2026-04-30.
 
 ## Next milestone
 Milestone 1: main synchronizer hardening.
@@ -41,7 +41,7 @@ Dependencies:
 - Syntax and test quality gates pass.
 
 ## Validation checklist for next story
-- `python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py`
+- `python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py`
 - `python3 -m unittest discover -s tests`
 - Confirm no live Zotero API call is made during unit tests.
 - Confirm `.context/docs/planning_gsd/STATE.md` is updated with evidence.
@@ -73,7 +73,7 @@ Required behavior:
 - Add unittest coverage for import-safety, resolve_target_folder, normalize_filename, normalize_aggressive, and _coerce_response_items malformed/empty cases.
 
 Verification:
-- Run: python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py
+- Run: python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
 - Run: python3 -m unittest discover -s tests
 - Update .context/docs/planning_gsd/STATE.md with exact validation evidence.
 
@@ -132,7 +132,7 @@ Return a concise result with files changed and command results.
 - 2026-04-30: sync executado em `2026-04-30T20:38:11.717068` com a lógica de consolidação automática concluiu com `0` erros e consolidou os casos de colisão por `mtime` e hash.
 - 2026-04-30: diagnóstico final após a consolidação automática mostrou `446` PDFs no drive e `0` ausentes por nome no Zotero. O delta de `461 -> 446` PDFs confirma a remoção dos 15 redundantes que antes impediam a reconciliação nominal.
 - 2026-04-30: `zotero_sync_webdav.py` passou a expor uma CLI unificada com subcomandos `sync`, `diagnostico`, `remove-duplicatas` e `setup-autostart`, mantendo o modo sem argumentos como sincronização principal.
-- 2026-04-30: o diagnóstico e a remoção de duplicatas foram incorporados ao script principal com reutilização das funções já existentes de coleta, normalização e comparação de nomes; os wrappers legados `zotero_diagnostico.py` e `zotero_remove_duplicatas.py` agora apenas encaminham para a CLI unificada.
-- 2026-04-30: o autostart foi integrado ao entrypoint principal via subcomando `setup-autostart`, que delega ao backend shell existente `setup_autostart.sh` para preservar o fluxo systemd/keyring já estabilizado.
-- 2026-04-30: validação da integração passou em `python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py`, `python3 zotero_sync_webdav.py --help`, `python3 zotero_diagnostico.py --help` e `python3 zotero_remove_duplicatas.py --help`.
+- 2026-04-30: o diagnóstico, a remoção de duplicatas e o autostart foram incorporados ao script principal com reutilização das funções existentes e backend embutido; os arquivos separados antigos deixaram de ser entrypoints necessários.
+- 2026-04-30: validação da integração passou em `python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py` e `python3 zotero_sync_webdav.py --help`.
 - 2026-04-30: os modos integrados `python3 zotero_sync_webdav.py diagnostico` e `python3 zotero_sync_webdav.py remove-duplicatas` também executaram corretamente contra a biblioteca real durante a validação.
+- 2026-04-30: os arquivos separados antigos `zotero_diagnostico.py`, `zotero_remove_duplicatas.py` e `setup_autostart.sh` foram removidos da raiz do repositório após a integração completa.

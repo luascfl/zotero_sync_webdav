@@ -13,7 +13,7 @@ status: filled
 
 ## Quick facts
 - Root: `/home/lucas/Downloads/zotero_sync_webdav`
-- Language: Python, 4 script files observed.
+- Language: Python, 2 active script files observed.
 - Runtime target: Linux with a mounted WebDAV directory.
 - Primary external dependency: `pyzotero` for the Zotero API.
 - Supporting dependency: `tqdm` for progress display in the main sync script.
@@ -21,10 +21,7 @@ status: filled
 
 ## Entry points
 - [`zotero_sync_webdav.py`](../../zotero_sync_webdav.py): primary unified CLI for sync, diagnostics, duplicate cleanup, and autostart setup.
-- [`zotero_diagnostico.py`](../../zotero_diagnostico.py): legacy wrapper that forwards to `python3 zotero_sync_webdav.py diagnostico`.
-- [`zotero_remove_duplicatas.py`](../../zotero_remove_duplicatas.py): legacy wrapper that forwards to `python3 zotero_sync_webdav.py remove-duplicatas`.
 - [`zotero_mirror_collections_to_obsidian.py`](../../zotero_mirror_collections_to_obsidian.py): mirrors Zotero collections into Obsidian folders.
-- [`setup_autostart.sh`](../../setup_autostart.sh): legacy backend script invoked by `python3 zotero_sync_webdav.py setup-autostart`.
 
 ## Code organization
 - Root Python scripts hold all runtime behavior.
@@ -40,7 +37,7 @@ The project uses Python scripts instead of a package layout. It talks to Zotero 
 1. Create `.env` or `~/.config/zotero_sync_webdav/zotero_sync.env` with `ZOTERO_LIBRARY_ID`, `ZOTERO_LIBRARY_TYPE`, `ZOTERO_API_KEY`, and `ZOTERO_SYNC_TARGET_FOLDER`.
 2. Ensure the WebDAV folder is mounted and readable.
 3. Install runtime dependencies, at least `pyzotero` and `tqdm`.
-4. Run syntax validation with `python3 -m py_compile zotero_sync_webdav.py zotero_diagnostico.py zotero_remove_duplicatas.py zotero_mirror_collections_to_obsidian.py`.
+4. Run syntax validation with `python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py`.
 5. Run `python3 zotero_sync_webdav.py diagnostico` before destructive cleanup work.
 6. Run `python3 zotero_sync_webdav.py` for the automated sync path.
 

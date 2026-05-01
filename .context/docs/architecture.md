@@ -16,11 +16,12 @@ The primary topology is a local automation script that reads configuration from 
 
 ## Architectural layers
 - Configuration: `.env`, `~/.config/zotero_sync_webdav/zotero_sync.env`, and path resolution helpers.
-- External API access: `pyzotero.Zotero` calls for attachment discovery, creation, deletion, and metadata updates.
+- External API access: `pyzotero.Zotero` calls for attachment discovery, creation, deletion, metadata updates, diagnostics, and duplicate cleanup.
 - Filesystem scanning: WebDAV PDF discovery, local Zotero storage discovery, rename, and copy operations.
 - Hash/cache layer: SHA-256 hashes stored under `~/.cache/zotero_sync_webdav/hash_cache.json`.
 - Reporting layer: console output, logging, daily log file, optional desktop notification.
-- Support utilities: diagnostic, duplicate cleanup, and Obsidian mirror scripts.
+- Unified operations layer: the main script now exposes sync, diagnostics, duplicate cleanup, and autostart setup from one CLI.
+- Support utilities: Obsidian mirror script.
 
 ## Detected design patterns
 | Pattern | Confidence | Locations | Description |
@@ -33,13 +34,10 @@ The primary topology is a local automation script that reads configuration from 
 
 ## Entry points
 - `zotero_sync_webdav.py`: primary unified automation path with subcommands for sync, diagnostics, duplicate cleanup, and autostart setup.
-- `zotero_diagnostico.py`: legacy compatibility wrapper to the integrated diagnostic mode.
-- `zotero_remove_duplicatas.py`: legacy compatibility wrapper to the integrated duplicate-cleanup mode.
 - `zotero_mirror_collections_to_obsidian.py`: folder mirror path.
-- `setup_autostart.sh`: shell backend still used by the integrated autostart mode.
 
 ## Public API surface
-These scripts are executable rather than imported library modules. Important callable units observed by AI Coders Context include `collect_all_pdfs`, `collect_all_attachments`, `compute_sha256`, `rename_webdav_file`, `rename_local_attachment`, `copy_to_local_storage`, `check_duplicates`, `check_missing_in_zotero`, and `find_duplicate_groups`.
+Important callable units observed in the unified script include `collect_all_pdfs`, `collect_all_attachments`, `compute_sha256`, `rename_webdav_file`, `rename_local_attachment`, `copy_to_local_storage`, `build_duplicate_groups`, `find_missing_drive_pdfs_in_zotero`, `run_diagnostic_mode`, and `run_duplicate_cleanup_mode`.
 
 ## External service dependencies
 - Zotero API: requires `ZOTERO_LIBRARY_ID`, `ZOTERO_LIBRARY_TYPE`, and `ZOTERO_API_KEY`.
