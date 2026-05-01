@@ -1673,59 +1673,67 @@ def run_sync_mode():
 
                 if canonical_path and os.path.exists(canonical_path):
                     entry_info = entry.get('info', {}) or {}
-                    canonical_name = os.path.basename(canonical_path)
+                    zotero_name = entry_info.get('original') or os.path.basename(canonical_path)
+                    local_copy_name = os.path.basename(canonical_path)
+                    canonical_name = zotero_name
                     local_copy_mtime = os.path.getmtime(canonical_path)
                     zotero_date_modified = parse_zotero_date(entry_info.get('dateModified', ''))
                     zotero_mtime = zotero_date_modified.timestamp() if zotero_date_modified else local_copy_mtime
 
                     logging.info(
-                        "[CASO 3] Mesmo conteúdo, nomes diferentes: WebDAV='%s' | storage='%s' (key=%s).",
-                        webdav_name, canonical_name, canonical_key,
+                        "[CASO 3] Mesmo conteúdo, nomes diferentes: drive='%s' | zotero='%s' | local_copy='%s' (key=%s).",
+                        webdav_name, zotero_name, local_copy_name, canonical_key,
                     )
                     logging.info(
-                        "[CASO 3] Datas: drive=%.3f | zotero=%.3f | local_copy=%.3f.",
+                        "[CASO 3] Datas: drive=%.6f | zotero=%.6f | local_copy=%.6f.",
                         webdav_mtime,
                         zotero_mtime,
                         local_copy_mtime,
                     )
 
-                    drive_ts = int(webdav_mtime)
-                    zotero_ts = int(zotero_mtime)
-
-                    if drive_ts > zotero_ts:
+                    if webdav_mtime > zotero_mtime:
                         updated_path = rename_local_attachment(zot, canonical_key, canonical_path, webdav_name)
                         if updated_path != canonical_path:
                             entry['path'] = updated_path
                             entry['filename'] = webdav_name
                             key_to_path[canonical_key] = updated_path
+                            entry_info['original'] = webdav_name
                             entry_info['dateModified'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
                             stats['renamed_local'] += 1
                             logging.info("[CASO 3] Zotero atualizado para o nome mais recente do drive: '%s'.", webdav_name)
 
-                        canonical_drive_path = os.path.join(os.path.dirname(file_path), canonical_name)
+                        canonical_drive_path = os.path.join(os.path.dirname(file_path), zotero_name)
                         if canonical_drive_path != file_path and os.path.exists(canonical_drive_path):
                             if delete_redundant_webdav_duplicate(canonical_drive_path, file_path, canonical_hash=file_hash):
                                 stats['pruned_drive_duplicates'] += 1
-                    elif zotero_ts > drive_ts:
-                        canonical_drive_path = os.path.join(os.path.dirname(file_path), canonical_name)
+                    elif zotero_mtime > webdav_mtime:
+                        if local_copy_name != zotero_name:
+                            updated_path = rename_local_attachment(zot, canonical_key, canonical_path, zotero_name)
+                            if updated_path != canonical_path:
+                                entry['path'] = updated_path
+                                entry['filename'] = zotero_name
+                                key_to_path[canonical_key] = updated_path
+                                stats['renamed_local'] += 1
+
+                        canonical_drive_path = os.path.join(os.path.dirname(file_path), zotero_name)
                         if canonical_drive_path != file_path and os.path.exists(canonical_drive_path):
                             if delete_redundant_webdav_duplicate(file_path, canonical_drive_path):
                                 file_path = canonical_drive_path
-                                file_name = canonical_name
+                                file_name = zotero_name
                                 stats['pruned_drive_duplicates'] += 1
                         else:
-                            new_path = rename_webdav_file(file_path, canonical_name)
+                            new_path = rename_webdav_file(file_path, zotero_name)
                             if new_path != file_path:
                                 file_path = new_path
-                                file_name = canonical_name
+                                file_name = zotero_name
                                 stats['renamed_webdav'] += 1
-                                logging.info("[CASO 3] Drive atualizado para o nome mais recente do Zotero: '%s'.", canonical_name)
+                                logging.info("[CASO 3] Drive atualizado para o nome mais recente do Zotero: '%s'.", zotero_name)
                     else:
                         stats['mtime_ties'] += 1
                         tie_conflicts.append({
                             'key': canonical_key,
                             'drive_name': webdav_name,
-                            'zotero_name': canonical_name,
+                            'zotero_name': zotero_name,
                         })
                         logging.warning(
                             "[CASO 3] Empate de mtime entre drive e Zotero para key=%s. Mantidos os nomes atuais para revisão manual.",
