@@ -65,8 +65,9 @@ from tqdm import tqdm
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+CONFIG_ENV_FILE = Path.home() / ".config" / "zotero_sync_webdav" / "zotero_sync.env"
+PROJECT_ENV_FILE = SCRIPT_DIR / ".env"
 env_file_from_env = os.environ.get("ZOTERO_ENV_FILE")
-DEFAULT_ENV_FILE = Path(env_file_from_env) if env_file_from_env else SCRIPT_DIR / ".env"
 
 
 def load_env_file(env_path: os.PathLike[str] | str) -> None:
@@ -90,7 +91,13 @@ def load_env_file(env_path: os.PathLike[str] | str) -> None:
         logging.warning("Falha ao carregar variáveis do arquivo %s: %s", env_file, exc)
 
 
-load_env_file(DEFAULT_ENV_FILE)
+if env_file_from_env:
+    load_env_file(env_file_from_env)
+else:
+    # Prioriza a configuração operacional do serviço/autostart. O .env do projeto fica
+    # como fallback local para desenvolvimento e não deve sobrescrever variáveis já carregadas.
+    load_env_file(CONFIG_ENV_FILE)
+    load_env_file(PROJECT_ENV_FILE)
 
 # --- Configuração Final (via .env / variáveis de ambiente) ---
 LIBRARY_ID = os.environ.get("ZOTERO_LIBRARY_ID")
@@ -108,7 +115,8 @@ missing_env = [name for name, value in {
 if missing_env:
     raise RuntimeError(
         f"Defina as variáveis de ambiente obrigatórias ({', '.join(missing_env)}). "
-        "Use um arquivo .env na raiz do projeto ou exporte-as antes de executar."
+        "Use ~/.config/zotero_sync_webdav/zotero_sync.env, um .env na raiz do projeto, "
+        "ZOTERO_ENV_FILE ou exporte-as antes de executar."
     )
 
 

@@ -1,6 +1,6 @@
 # GSD state
 
-Updated: 2026-04-30
+Updated: 2026-05-01
 
 ## Current state
 - Context bootstrap is complete enough to propose the next Ralph cycle.
@@ -10,6 +10,7 @@ Updated: 2026-04-30
 - Active technical priority is hardening.
 - `padronizar_contatos_google.py` removal is intentional because it did not belong to this repository.
 
+- Active sync target is now the direct rclone Google Drive mount at `/home/lucas/Google Drive/zoterodb`; GVFS/WebDAV remains manual-only.
 ## Active milestone
 Milestone 0: governance bootstrap.
 
@@ -136,3 +137,8 @@ Return a concise result with files changed and command results.
 - 2026-04-30: validação da integração passou em `python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py` e `python3 zotero_sync_webdav.py --help`.
 - 2026-04-30: os modos integrados `python3 zotero_sync_webdav.py diagnostico` e `python3 zotero_sync_webdav.py remove-duplicatas` também executaram corretamente contra a biblioteca real durante a validação.
 - 2026-04-30: os arquivos separados antigos `zotero_diagnostico.py`, `zotero_remove_duplicatas.py` e `setup_autostart.sh` foram removidos da raiz do repositório após a integração completa.
+
+- 2026-05-01: changed operational config in `~/.config/zotero_sync_webdav/zotero_sync.env` so both `ZOTERO_SYNC_TARGET_FOLDER` and `ZSW_TARGET_FOLDER` point to `/home/lucas/Google Drive/zoterodb`.
+- 2026-05-01: updated `zotero_sync_webdav.py` to load `~/.config/zotero_sync_webdav/zotero_sync.env` by default before project `.env`, so manual runs and installed service use the same operational target unless `ZOTERO_ENV_FILE` overrides it.
+- 2026-05-01: updated `zotero-sync.service` to require `rclone-google-drive.service` instead of `webdav-koofr.service`, installed the updated script to `~/.local/bin/zotero_sync_webdav.py`, and verified the wait helper succeeds against `/home/lucas/Google Drive/zoterodb`.
+- 2026-05-01: validation passed: `python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py`; import checks for both repo and installed script printed `/home/lucas/Google Drive/zoterodb`.
