@@ -1556,10 +1556,10 @@ def run_sync_mode():
         #          → Já sincronizado. Ignora.
         #
         # CASO 2 — Nome encontrado no Zotero, hash diferente do storage local
-        #          → Conteúdo foi atualizado no WebDAV. Atualiza o arquivo no Zotero.
+        #          → Conteúdo do drive é tratado como versão mais recente para a cópia local.
         #
         # CASO 3 — Nome NÃO encontrado, hash encontrado no storage local
-        #          → Arquivo foi renomeado no WebDAV. Atualiza o nome no Zotero e no storage.
+        #          → Mesmo conteúdo com nomes diferentes. Decide o nome canônico por mtime/dateModified.
         #
         # CASO 4 — Nome NÃO encontrado, hash NÃO encontrado
         #          → Arquivo novo. Adiciona ao Zotero e copia para storage local.
