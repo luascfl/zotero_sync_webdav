@@ -700,6 +700,10 @@ def bibliographic_item_entry(item: dict) -> dict | None:
         'itemType': data.get('itemType'),
         'dateAdded': data.get('dateAdded'),
         'dateModified': data.get('dateModified'),
+        'collections': list(data.get('collections') or []),
+        'tags': list(data.get('tags') or []),
+        'relations': dict(data.get('relations') or {}),
+        'item': item,
     }
 
 
@@ -764,6 +768,161 @@ def select_parent_for_new_attachment(
     if len(top_candidates) == 1:
         return top_candidates[0], candidates
     return None, candidates
+
+
+def bibliographic_duplicate_identity(entry: dict) -> tuple[str, str] | None:
+    """Retorna identidade conservadora para agrupar duplicatas bibliográficas."""
+    doi = entry.get('doi') or ''
+    if doi:
+        return ('doi', doi)
+    title = entry.get('normalized_title') or ''
+    if len(title) >= 20:
+        return ('title', title)
+    return None
+
+
+def build_bibliographic_duplicate_groups(parent_index: List[dict]) -> List[dict]:
+    """Agrupa itens bibliográficos duplicados por DOI ou título normalizado exato."""
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for entry in parent_index:
+        identity = bibliographic_duplicate_identity(entry)
+        if not identity:
+            continue
+        grouped.setdefault(identity, []).append(entry)
+
+    duplicate_groups: list[dict] = []
+    for identity, entries in grouped.items():
+        if len(entries) < 2:
+            continue
+        sorted_entries = sorted(entries, key=lambda entry: (entry.get('dateAdded') or '', entry.get('key') or ''))
+        duplicate_groups.append({
+            'identity': identity,
+            'items': sorted_entries,
+        })
+    return duplicate_groups
+
+
+def attachment_is_pdf(item: dict) -> bool:
+    """Confirma se um child item é anexo PDF."""
+    data = item.get('data', {})
+    if data.get('itemType') != 'attachment':
+        return False
+    filename = get_filename_from_item(item)
+    content_type = (data.get('contentType') or '').lower()
+    return filename.lower().endswith('.pdf') or content_type == 'application/pdf'
+
+
+def summarize_duplicate_children(
+    children: List[dict],
+    key_to_path: Dict[str, str] | None = None,
+) -> dict:
+    """Resume children de item duplicado sem permitir deleção quando há dados únicos."""
+    key_to_path = key_to_path or {}
+    summary = {
+        'pdf_hashes': set(),
+        'pdf_filenames': [],
+        'unsafe_children': [],
+        'missing_hash_attachments': [],
+    }
+
+    for child in children:
+        data = child.get('data', {})
+        child_key = child.get('key') or data.get('key')
+        if not attachment_is_pdf(child):
+            summary['unsafe_children'].append(child_key or '?')
+            continue
+
+        filename = get_filename_from_item(child)
+        summary['pdf_filenames'].append(filename)
+        local_path = key_to_path.get(child_key) if child_key else None
+        if not local_path:
+            local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, child_key)) if child_key else None
+        if not local_path or not os.path.exists(local_path):
+            summary['missing_hash_attachments'].append(child_key or filename or '?')
+            continue
+        file_hash = compute_sha256(local_path)
+        if file_hash:
+            summary['pdf_hashes'].add(file_hash)
+        else:
+            summary['missing_hash_attachments'].append(child_key or filename or '?')
+
+    return summary
+
+
+def _entry_timestamp(entry: dict) -> float:
+    parsed = parse_zotero_date(entry.get('dateAdded') or '')
+    return parsed.timestamp() if parsed else float('inf')
+
+
+def choose_bibliographic_duplicate_keeper(
+    entries: List[dict],
+    child_summaries: Dict[str, dict],
+) -> dict:
+    """Escolhe item mestre preservando PDFs antes de preferir antiguidade."""
+    def score(entry: dict) -> tuple[int, int, float, str]:
+        summary = child_summaries.get(entry.get('key'), {})
+        has_pdf = 1 if summary.get('pdf_hashes') else 0
+        has_non_copy_pdf = 1 if any(
+            not is_copy_variant_filename(filename)
+            for filename in summary.get('pdf_filenames', [])
+        ) else 0
+        return (has_pdf, has_non_copy_pdf, -_entry_timestamp(entry), entry.get('key') or '')
+
+    return max(entries, key=score)
+
+
+def duplicate_item_can_be_deleted(
+    duplicate_entry: dict,
+    keeper_entry: dict,
+    duplicate_summary: dict,
+    keeper_summary: dict,
+) -> tuple[bool, str]:
+    """Decide se uma duplicata bibliográfica pode ser apagada sem perder conteúdo."""
+    if duplicate_entry.get('relations'):
+        return False, "item duplicado tem relações Zotero"
+    if duplicate_summary.get('unsafe_children'):
+        return False, "item duplicado tem notas ou anexos não-PDF"
+    if duplicate_summary.get('missing_hash_attachments'):
+        return False, "não foi possível validar hash de todos os anexos PDF"
+
+    duplicate_hashes = set(duplicate_summary.get('pdf_hashes') or set())
+    keeper_hashes = set(keeper_summary.get('pdf_hashes') or set())
+    if not duplicate_entry.get('doi') and not duplicate_hashes and not keeper_hashes:
+        return False, "duplicata por título sem DOI nem PDF redundante validado"
+    if duplicate_hashes and not duplicate_hashes.issubset(keeper_hashes):
+        return False, "item duplicado tem PDF não redundante no mestre"
+    return True, "seguro"
+
+def merge_duplicate_metadata_into_keeper(
+    zot: zotero.Zotero,
+    keeper_entry: dict,
+    duplicate_entry: dict,
+) -> bool:
+    """Preserva coleções e tags da duplicata antes de apagá-la."""
+    keeper_item = keeper_entry.get('item')
+    if not keeper_item:
+        return True
+
+    data = keeper_item.get('data', {})
+    changed = False
+
+    current_collections = list(data.get('collections') or [])
+    merged_collections = sorted(set(current_collections) | set(duplicate_entry.get('collections') or []))
+    if merged_collections != current_collections:
+        data['collections'] = merged_collections
+        changed = True
+
+    current_tags = list(data.get('tags') or [])
+    by_tag = {tag.get('tag'): tag for tag in current_tags if tag.get('tag')}
+    for tag in duplicate_entry.get('tags') or []:
+        tag_name = tag.get('tag')
+        if tag_name and tag_name not in by_tag:
+            by_tag[tag_name] = tag
+            changed = True
+    if changed:
+        data['tags'] = list(by_tag.values())
+        zot.update_item(keeper_item)
+    return True
 
 
 def collect_all_pdfs(directory: str, stats: dict) -> List[str]:
@@ -1085,6 +1244,118 @@ def delete_attachment_keys(zot: zotero.Zotero, keys: List[str], dry_run: bool) -
             print(f'    ❌ Falha ao deletar key={key}: {exc}')
             deleted_err += 1
     return deleted_ok, deleted_err
+
+
+def run_safe_bibliographic_duplicate_cleanup(
+    zot: zotero.Zotero,
+    stats: dict,
+    key_to_path: Dict[str, str],
+) -> bool:
+    """Remove automaticamente duplicatas bibliográficas comprovadamente redundantes."""
+    stats.setdefault('bibliographic_duplicate_groups', 0)
+    stats.setdefault('auto_removed_bibliographic_duplicates', 0)
+    stats.setdefault('auto_duplicate_cleanup_skipped', 0)
+    stats.setdefault('merged_duplicate_metadata', 0)
+
+    try:
+        bibliographic_items = collect_all_bibliographic_items(zot, stats)
+        parent_index = build_bibliographic_parent_index(bibliographic_items)
+    except Exception as exc:
+        stats['errors'] += 1
+        logging.error("[DUP-BIB] Falha ao coletar itens bibliográficos para limpeza automática: %s", exc)
+        return False
+
+    groups = build_bibliographic_duplicate_groups(parent_index)
+    stats['bibliographic_duplicate_groups'] = len(groups)
+    if not groups:
+        logging.info("[DUP-BIB] Nenhuma duplicata bibliográfica detectada para limpeza automática.")
+        return False
+
+    logging.info("[DUP-BIB] %d grupo(s) de duplicatas bibliográficas detectado(s).", len(groups))
+    changed = False
+
+    for group in groups:
+        child_summaries: dict[str, dict] = {}
+        failed_children = False
+        for entry in group['items']:
+            key = entry['key']
+            try:
+                children = zot.children(key)
+            except Exception as exc:
+                stats['errors'] += 1
+                stats['auto_duplicate_cleanup_skipped'] += 1
+                failed_children = True
+                logging.warning("[DUP-BIB] Falha ao buscar filhos de %s: %s", key, exc)
+                break
+            child_summaries[key] = summarize_duplicate_children(children, key_to_path)
+
+        if failed_children:
+            continue
+
+        keeper = choose_bibliographic_duplicate_keeper(group['items'], child_summaries)
+        keeper_key = keeper['key']
+        keeper_summary = child_summaries.get(keeper_key, {})
+        logging.info(
+            "[DUP-BIB] Grupo %s: mestre escolhido key=%s title='%s'.",
+            group['identity'],
+            keeper_key,
+            keeper.get('title', '')[:120],
+        )
+
+        for duplicate in group['items']:
+            duplicate_key = duplicate['key']
+            if duplicate_key == keeper_key:
+                continue
+
+            duplicate_summary = child_summaries.get(duplicate_key, {})
+            can_delete, reason = duplicate_item_can_be_deleted(
+                duplicate,
+                keeper,
+                duplicate_summary,
+                keeper_summary,
+            )
+            if not can_delete:
+                stats['auto_duplicate_cleanup_skipped'] += 1
+                logging.warning(
+                    "[DUP-BIB] Duplicata key=%s não removida: %s.",
+                    duplicate_key,
+                    reason,
+                )
+                continue
+
+            try:
+                before_collections = set((keeper.get('item') or {}).get('data', {}).get('collections') or [])
+                before_tags = {
+                    tag.get('tag')
+                    for tag in (keeper.get('item') or {}).get('data', {}).get('tags', [])
+                    if tag.get('tag')
+                }
+                merge_duplicate_metadata_into_keeper(zot, keeper, duplicate)
+                after_collections = set((keeper.get('item') or {}).get('data', {}).get('collections') or [])
+                after_tags = {
+                    tag.get('tag')
+                    for tag in (keeper.get('item') or {}).get('data', {}).get('tags', [])
+                    if tag.get('tag')
+                }
+                if before_collections != after_collections or before_tags != after_tags:
+                    stats['merged_duplicate_metadata'] += 1
+
+                zot.delete_item(duplicate['item'])
+                stats['auto_removed_bibliographic_duplicates'] += 1
+                changed = True
+                logging.info(
+                    "[DUP-BIB] Duplicata bibliográfica removida automaticamente: key=%s title='%s' | mestre=%s.",
+                    duplicate_key,
+                    duplicate.get('title', '')[:120],
+                    keeper_key,
+                )
+                time.sleep(0.3)
+            except Exception as exc:
+                stats['errors'] += 1
+                stats['auto_duplicate_cleanup_skipped'] += 1
+                logging.error("[DUP-BIB] Falha ao remover duplicata key=%s: %s", duplicate_key, exc)
+
+    return changed
 
 
 def connect_zotero_client() -> zotero.Zotero:
@@ -2009,6 +2280,10 @@ def run_sync_mode():
         'zotero_bibliographic_indexed': 0,
         'attached_to_existing_parent': 0,
         'blocked_duplicate_risk': 0,
+        'bibliographic_duplicate_groups': 0,
+        'auto_removed_bibliographic_duplicates': 0,
+        'auto_duplicate_cleanup_skipped': 0,
+        'merged_duplicate_metadata': 0,
     }
     tie_conflicts: list[dict[str, str]] = []
 
@@ -2456,6 +2731,17 @@ def run_sync_mode():
                 cleanup_failed_attachment_upload(zot, file_path)
 
 
+
+        cleanup_changed = run_safe_bibliographic_duplicate_cleanup(zot, stats, key_to_path)
+        if cleanup_changed:
+            logging.info("[DUP-BIB] Biblioteca alterada por limpeza automática. Recarregando anexos antes de Zotero -> drive.")
+            (
+                all_attachments,
+                existing_filenames,
+                existing_filenames_aggressive,
+            ) = collect_all_attachments(zot, stats)
+            stats['zotero_unique_filenames'] = len(existing_filenames)
+
         logging.info("[ZOT->DRIVE] Iniciando reconciliação Zotero -> drive para anexos ausentes.")
         drive_name_index, drive_aggressive_index, drive_hash_index = build_drive_pdf_index(TARGET_FOLDER, stats)
         materialize_zotero_attachments_to_drive(
@@ -2521,6 +2807,10 @@ def run_sync_mode():
 │ 📤 Materializados no drive: {stats['materialized_drive']:<20} │
 │ ⚖️  Empates de mtime: {stats['mtime_ties']:<25} │
 │ 🛑 Bloqueios anti-duplicata: {stats['blocked_duplicate_risk']:<18} │
+│ 🧾 Grupos duplicados bib.: {stats['bibliographic_duplicate_groups']:<20} │
+│ 🧹 Duplicatas Zotero remov.: {stats['auto_removed_bibliographic_duplicates']:<17} │
+│ 🔀 Metadados mesclados: {stats['merged_duplicate_metadata']:<24} │
+│ ⏸️  Limpezas ignoradas: {stats['auto_duplicate_cleanup_skipped']:<24} │
 └──────────────────────────────────────────────────────┘
 {tie_summary}
 

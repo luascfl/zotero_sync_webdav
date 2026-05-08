@@ -169,6 +169,73 @@ class BibliographicMatchingTests(unittest.TestCase):
             self.assertFalse(duplicate.exists())
             self.assertEqual(stats["renamed_webdav"], 1)
 
+    def test_bibliographic_duplicate_groups_use_doi_before_title(self):
+        index = zsync.build_bibliographic_parent_index([
+            make_item("OLDITEM1", "Título antigo grafia A", doi="https://doi.org/10.123/ABC"),
+            make_item("NEWITEM2", "Título novo grafia B", doi="10.123/abc"),
+        ])
+
+        groups = zsync.build_bibliographic_duplicate_groups(index)
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["identity"], ("doi", "10.123/abc"))
+        self.assertEqual({item["key"] for item in groups[0]["items"]}, {"OLDITEM1", "NEWITEM2"})
+
+    def test_duplicate_cleanup_keeper_prefers_pdf_over_empty_older_item(self):
+        older = {"key": "OLD", "dateAdded": "2024-01-01T00:00:00Z"}
+        newer_with_pdf = {"key": "NEW", "dateAdded": "2026-01-01T00:00:00Z"}
+
+        keeper = zsync.choose_bibliographic_duplicate_keeper(
+            [older, newer_with_pdf],
+            {
+                "OLD": {"pdf_hashes": set(), "pdf_filenames": []},
+                "NEW": {"pdf_hashes": {"abc"}, "pdf_filenames": ["Arquivo X.pdf"]},
+            },
+        )
+
+        self.assertEqual(keeper["key"], "NEW")
+
+    def test_duplicate_cleanup_allows_redundant_pdf_hash_deletion(self):
+        duplicate = {"key": "DUP", "doi": "10.123/x", "relations": {}}
+        keeper = {"key": "KEEP", "doi": "10.123/x", "relations": {}}
+
+        can_delete, reason = zsync.duplicate_item_can_be_deleted(
+            duplicate,
+            keeper,
+            {"pdf_hashes": {"same"}, "unsafe_children": [], "missing_hash_attachments": []},
+            {"pdf_hashes": {"same"}, "unsafe_children": [], "missing_hash_attachments": []},
+        )
+
+        self.assertTrue(can_delete, reason)
+
+    def test_duplicate_cleanup_blocks_nonredundant_pdf_hash(self):
+        duplicate = {"key": "DUP", "doi": "10.123/x", "relations": {}}
+        keeper = {"key": "KEEP", "doi": "10.123/x", "relations": {}}
+
+        can_delete, reason = zsync.duplicate_item_can_be_deleted(
+            duplicate,
+            keeper,
+            {"pdf_hashes": {"different"}, "unsafe_children": [], "missing_hash_attachments": []},
+            {"pdf_hashes": {"same"}, "unsafe_children": [], "missing_hash_attachments": []},
+        )
+
+        self.assertFalse(can_delete)
+        self.assertIn("não redundante", reason)
+
+    def test_duplicate_cleanup_blocks_title_only_metadata_without_pdf(self):
+        duplicate = {"key": "DUP", "doi": "", "relations": {}}
+        keeper = {"key": "KEEP", "doi": "", "relations": {}}
+
+        can_delete, reason = zsync.duplicate_item_can_be_deleted(
+            duplicate,
+            keeper,
+            {"pdf_hashes": set(), "unsafe_children": [], "missing_hash_attachments": []},
+            {"pdf_hashes": set(), "unsafe_children": [], "missing_hash_attachments": []},
+        )
+
+        self.assertFalse(can_delete)
+        self.assertIn("sem DOI", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
