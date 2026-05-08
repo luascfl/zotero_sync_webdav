@@ -46,6 +46,7 @@ import argparse
 import atexit
 import hashlib
 import heapq
+from difflib import SequenceMatcher
 import json
 import logging
 import os
@@ -533,6 +534,186 @@ def parse_zotero_date(date_str: str) -> datetime | None:
         logging.warning("[ZOT] Data inválida recebida: %s", date_str)
         return None
 
+def normalize_bibliographic_text(value: str) -> str:
+    """Normaliza texto bibliográfico para comparação conservadora de títulos."""
+    if not value:
+        return ""
+    try:
+        decomposed = unicodedata.normalize('NFD', str(value))
+        without_accents = "".join(
+            char for char in decomposed if not unicodedata.combining(char)
+        )
+        lowered = without_accents.lower()
+        alnum_only = re.sub(r'[^a-z0-9]+', ' ', lowered)
+        return re.sub(r'\s+', ' ', alnum_only).strip()
+    except Exception as exc:
+        logging.warning("[BIB] Erro ao normalizar texto bibliográfico %r: %s", value, exc)
+        return ""
+
+
+def normalize_doi(value: str | None) -> str:
+    """Normaliza DOI para chave estável de comparação bibliográfica."""
+    if not value:
+        return ""
+    doi = str(value).strip().lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if doi.startswith(prefix):
+            doi = doi[len(prefix):]
+    return doi.strip()
+
+
+def filename_title_candidates(filename: str) -> List[str]:
+    """Gera candidatos de título a partir de um nome de PDF no padrão Zotero."""
+    stem = Path(os.path.basename(filename)).stem
+    raw_variants: list[str] = [stem]
+
+    def clean(value: str) -> str:
+        value = value.replace("_", " ")
+        value = re.sub(r'\s*\(\d+\)\s*$', '', value)
+        value = re.sub(r'(\b(?:18|19|20)\d{2})\s+\d+\s*$', r'\1', value)
+        value = re.sub(r'\s+', ' ', value)
+        return value.strip(" -_.")
+
+    cleaned = clean(stem)
+    raw_variants.append(cleaned)
+
+    if " - " in cleaned:
+        left, right = cleaned.rsplit(" - ", 1)
+        if re.search(r'\b(?:18|19|20)\d{2}\b', right) or len(right.split()) <= 4:
+            raw_variants.append(left)
+
+    without_leading_citation = re.sub(
+        r'^[A-Za-zÀ-ÿ0-9 ,._&+-]+?\(\s*(?:18|19|20)\d{2}\s*\)\s+',
+        '',
+        cleaned,
+    )
+    if without_leading_citation != cleaned:
+        raw_variants.append(without_leading_citation)
+        if " - " in without_leading_citation:
+            raw_variants.append(without_leading_citation.rsplit(" - ", 1)[0])
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for variant in raw_variants:
+        normalized = normalize_bibliographic_text(clean(variant))
+        if len(normalized) < 20 or normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append(normalized)
+    return candidates
+
+
+def title_match_score(candidate_title: str, item_title: str) -> float:
+    """Pontua uma possível correspondência de título sem aceitar palpites fracos."""
+    candidate = normalize_bibliographic_text(candidate_title)
+    title = normalize_bibliographic_text(item_title)
+    if len(candidate) < 20 or len(title) < 20:
+        return 0.0
+
+    if candidate == title:
+        return 1.0
+
+    if title.startswith(candidate):
+        coverage = len(candidate) / len(title)
+        if len(candidate) >= 35 or coverage >= 0.55:
+            return min(0.95, 0.78 + (coverage * 0.17))
+
+    if candidate.startswith(title):
+        coverage = len(title) / len(candidate)
+        if len(title) >= 35 or coverage >= 0.55:
+            return min(0.94, 0.78 + (coverage * 0.16))
+
+    if (candidate in title or title in candidate) and min(len(candidate), len(title)) >= 30:
+        return 0.85
+
+    ratio = SequenceMatcher(None, candidate, title).ratio()
+    if ratio >= 0.92:
+        return ratio
+    return 0.0
+
+
+def bibliographic_item_entry(item: dict) -> dict | None:
+    """Converte um item bibliográfico Zotero em entrada pesquisável para parent matching."""
+    data = item.get('data', {})
+    if data.get('itemType') == 'attachment':
+        return None
+    title = data.get('title') or ''
+    normalized_title = normalize_bibliographic_text(title)
+    if len(normalized_title) < 20:
+        return None
+    return {
+        'key': item.get('key') or data.get('key'),
+        'title': title,
+        'normalized_title': normalized_title,
+        'doi': normalize_doi(data.get('DOI')),
+        'itemType': data.get('itemType'),
+        'dateAdded': data.get('dateAdded'),
+        'dateModified': data.get('dateModified'),
+    }
+
+
+def build_bibliographic_parent_index(items: List[dict]) -> List[dict]:
+    """Cria índice de itens bibliográficos que podem receber anexos novos."""
+    entries: list[dict] = []
+    seen_keys: set[str] = set()
+    for item in items:
+        entry = bibliographic_item_entry(item)
+        key = entry.get('key') if entry else None
+        if not entry or not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        entries.append(entry)
+    return entries
+
+
+def find_parent_candidates_for_pdf(
+    filename: str,
+    parent_index: List[dict],
+    min_score: float = 0.82,
+) -> List[dict]:
+    """Encontra itens bibliográficos candidatos a pai de um PDF novo."""
+    title_candidates = filename_title_candidates(filename)
+    if not title_candidates:
+        return []
+
+    matches: list[dict] = []
+    for entry in parent_index:
+        best_score = 0.0
+        best_candidate = ""
+        for candidate in title_candidates:
+            score = title_match_score(candidate, entry.get('normalized_title', ''))
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+        if best_score >= min_score:
+            match = dict(entry)
+            match['score'] = round(best_score, 4)
+            match['matched_candidate'] = best_candidate
+            matches.append(match)
+
+    matches.sort(key=lambda match: (-match['score'], match.get('dateAdded') or '', match['key']))
+    return matches
+
+
+def select_parent_for_new_attachment(
+    filename: str,
+    parent_index: List[dict],
+    tie_margin: float = 0.03,
+) -> tuple[dict | None, List[dict]]:
+    """Seleciona pai único e seguro para anexar PDF novo, ou bloqueia ambiguidade."""
+    candidates = find_parent_candidates_for_pdf(filename, parent_index)
+    if not candidates:
+        return None, []
+
+    best_score = candidates[0]['score']
+    top_candidates = [
+        candidate for candidate in candidates
+        if best_score - candidate['score'] <= tie_margin
+    ]
+    if len(top_candidates) == 1:
+        return top_candidates[0], candidates
+    return None, candidates
+
 
 def collect_all_pdfs(directory: str, stats: dict) -> List[str]:
     """Retorna todos os PDFs da pasta, ordenados do mais recente ao mais antigo."""
@@ -660,6 +841,45 @@ def collect_all_attachments(
 
     # FIX: retorna tupla consistente mesmo quando vazio (bug anterior retornava [] sozinho)
     return all_items, existing_filenames, existing_filenames_aggressive
+
+def collect_all_bibliographic_items(zot: zotero.Zotero, stats: dict) -> List[dict]:
+    """Busca itens bibliográficos top-level para evitar anexos soltos duplicadores."""
+    page_size = 100
+    start = 0
+    all_items: list[dict] = []
+
+    logging.info("[BIB] Iniciando varredura completa de itens bibliográficos top-level.")
+
+    while True:
+        try:
+            items = zot.top(
+                limit=page_size,
+                start=start,
+                sort='dateAdded',
+                direction='desc',
+            )
+        except Exception as exc:
+            logging.error("[BIB] Falha ao obter itens bibliográficos (start=%d): %s", start, exc)
+            raise
+
+        if not items:
+            break
+
+        logging.debug("[BIB] Página recebida. start=%d | itens=%d.", start, len(items))
+        for item in items:
+            data = item.get('data', {})
+            if data.get('itemType') == 'attachment':
+                continue
+            if data.get('title'):
+                all_items.append(item)
+
+        if len(items) < page_size:
+            break
+        start += page_size
+
+    stats['zotero_bibliographic_scanned'] = len(all_items)
+    logging.info("[BIB] Varredura concluída. Itens bibliográficos: %d.", len(all_items))
+    return all_items
 
 
 def build_duplicate_groups(attachments: List[dict]) -> List[dict]:
@@ -1692,6 +1912,10 @@ def run_sync_mode():
         'pruned_drive_duplicates': 0,
         'materialized_drive': 0,
         'downloaded_zotero': 0,
+        'zotero_bibliographic_scanned': 0,
+        'zotero_bibliographic_indexed': 0,
+        'attached_to_existing_parent': 0,
+        'blocked_duplicate_risk': 0,
     }
     tie_conflicts: list[dict[str, str]] = []
 
@@ -1726,6 +1950,26 @@ def run_sync_mode():
         logging.error(f"Erro ao coletar anexos do Zotero: {e}")
         finalize_execution(stats)
         return
+
+    print("\nColetando itens bibliográficos para evitar anexos soltos duplicadores...")
+    try:
+        bibliographic_items = collect_all_bibliographic_items(zot, stats)
+        bibliographic_parent_index = build_bibliographic_parent_index(bibliographic_items)
+        stats['zotero_bibliographic_indexed'] = len(bibliographic_parent_index)
+        print(
+            f"✓ {stats['zotero_bibliographic_scanned']} itens bibliográficos escaneados | "
+            f"{stats['zotero_bibliographic_indexed']} títulos candidatos indexados."
+        )
+    except Exception as e:
+        stats['errors'] += 1
+        logging.error(
+            "[BIB] Erro ao coletar itens bibliográficos: %s. "
+            "Sincronização abortada para evitar criação de anexos soltos que podem virar duplicatas.",
+            e,
+        )
+        finalize_execution(stats)
+        return
+
 
     hash_index, key_to_path = build_local_storage_index(existing_filenames)
 
@@ -1969,9 +2213,41 @@ def run_sync_mode():
             existing_filenames[norm_local] = {'original': file_name, 'key': '__pending__'}
             existing_filenames_aggressive[norm_local_aggressive] = {'original': file_name, 'key': '__pending__'}
 
+            parent_match, parent_candidates = select_parent_for_new_attachment(
+                file_name,
+                bibliographic_parent_index,
+            )
+            parent_key = parent_match['key'] if parent_match else None
+            if parent_candidates and not parent_match:
+                existing_filenames.pop(norm_local, None)
+                existing_filenames_aggressive.pop(norm_local_aggressive, None)
+                stats['errors'] += 1
+                stats['blocked_duplicate_risk'] += 1
+                candidate_summary = "; ".join(
+                    f"{candidate['key']} score={candidate['score']:.2f} title='{candidate['title'][:90]}'"
+                    for candidate in parent_candidates[:5]
+                )
+                logging.error(
+                    "[DUP-RISK] '%s' parece pertencer a mais de um item bibliográfico existente. "
+                    "Upload bloqueado para não criar nova duplicata. Candidatos: %s",
+                    file_name,
+                    candidate_summary,
+                )
+                continue
+
+
             try:
-                logging.info("[CASO 4] Adicionando '%s' ao Zotero...", file_name)
-                response = zot.attachment_simple([file_path])
+                if parent_key:
+                    logging.info(
+                        "[CASO 4] Anexando '%s' ao item bibliográfico existente key=%s score=%.2f title='%s'.",
+                        file_name,
+                        parent_key,
+                        parent_match['score'],
+                        parent_match['title'],
+                    )
+                else:
+                    logging.info("[CASO 4] Adicionando '%s' ao Zotero como anexo top-level...", file_name)
+                response = zot.attachment_simple([file_path], parentid=parent_key)
                 if not response:
                     existing_filenames.pop(norm_local, None)
                     existing_filenames_aggressive.pop(norm_local_aggressive, None)
@@ -1993,6 +2269,8 @@ def run_sync_mode():
                         logging.error("[ERRO] Chave não retornada para '%s'. Resposta: %s", file_name, response)
                         continue
                     stats['added'] += 1
+                    if parent_key:
+                        stats['attached_to_existing_parent'] += 1
                     info = {'original': file_name, 'key': new_key, 'dateModified': None}
                     existing_filenames[norm_local] = info
                     existing_filenames_aggressive[norm_local_aggressive] = info
@@ -2004,7 +2282,15 @@ def run_sync_mode():
                     local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, new_key))
                     if local_path and os.path.exists(local_path):
                         register_local_hash(hash_index, key_to_path, new_key, local_path, info)
-                    logging.info("[CASO 4] '%s' adicionado com sucesso (key=%s).", file_name, new_key)
+                    if parent_key:
+                        logging.info(
+                            "[CASO 4] '%s' anexado ao item existente parent=%s com sucesso (key=%s).",
+                            file_name,
+                            parent_key,
+                            new_key,
+                        )
+                    else:
+                        logging.info("[CASO 4] '%s' adicionado como top-level com sucesso (key=%s).", file_name, new_key)
                     handled = True
 
                 if unchanged_items:
@@ -2085,6 +2371,8 @@ def run_sync_mode():
 ┌─── 📊 COLETA DE ANEXOS ──────────────────────────────┐
 │ Anexos varridos (total): {stats['zotero_attachments_scanned']:<25} │
 │ Nomes únicos indexados:  {stats['zotero_unique_filenames']:<25} │
+│ Itens bib. varridos:   {stats['zotero_bibliographic_scanned']:<25} │
+│ Títulos bib. indexados:{stats['zotero_bibliographic_indexed']:<25} │
 └──────────────────────────────────────────────────────┘
 
 ┌─── 📈 RESULTADOS DA VERIFICAÇÃO ───────────────────────┐
@@ -2092,6 +2380,7 @@ def run_sync_mode():
 │ 🔍 Processados: {total_verificados:<36} │
 │ ──────────────────────────────────────────────────── │
 │ ✅ Adicionados: {stats['added']} ({pct_adicionados:.1f}%) {' ' * (33 - len(str(stats['added']) + str(round(pct_adicionados,1))))}│
+│ 🔗 Anexados a item existente: {stats['attached_to_existing_parent']:<17} │
 │ ⏭️  Existentes: {stats['skipped']} ({pct_ignorados:.1f}%) {' ' * (33 - len(str(stats['skipped']) + str(round(pct_ignorados,1))))}│
 │ 💾 Cópias locais: {stats['local_copies']:<34} │
 │ ❌ Erros: {stats['errors']} ({pct_erros:.1f}%) {' ' * (38 - len(str(stats['errors']) + str(round(pct_erros,1))))}│
@@ -2103,6 +2392,7 @@ def run_sync_mode():
 │ ⬇️  Baixados do Zotero: {stats['downloaded_zotero']:<24} │
 │ 📤 Materializados no drive: {stats['materialized_drive']:<20} │
 │ ⚖️  Empates de mtime: {stats['mtime_ties']:<25} │
+│ 🛑 Bloqueios anti-duplicata: {stats['blocked_duplicate_risk']:<18} │
 └──────────────────────────────────────────────────────┘
 {tie_summary}
 
