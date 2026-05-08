@@ -812,6 +812,54 @@ def attachment_is_pdf(item: dict) -> bool:
     return filename.lower().endswith('.pdf') or content_type == 'application/pdf'
 
 
+def classify_unsafe_duplicate_child(child: dict) -> dict:
+    """Classifica children que impedem limpeza automática de duplicata."""
+    data = child.get('data', {})
+    child_key = child.get('key') or data.get('key') or '?'
+    item_type = (data.get('itemType') or '').lower()
+    annotation_type = (data.get('annotationType') or '').lower()
+    content_type = (data.get('contentType') or '').lower()
+    link_mode = (data.get('linkMode') or '').lower()
+
+    if item_type == 'note':
+        return {'key': child_key, 'reason': 'note', 'label': 'nota'}
+    if item_type == 'annotation':
+        if annotation_type == 'highlight':
+            return {'key': child_key, 'reason': 'highlight', 'label': 'highlight'}
+        if annotation_type:
+            return {
+                'key': child_key,
+                'reason': f'annotation:{annotation_type}',
+                'label': f'anotação {annotation_type}',
+            }
+        return {'key': child_key, 'reason': 'annotation', 'label': 'anotação'}
+    if item_type == 'attachment' and (link_mode == 'imported_url' or content_type == 'text/html'):
+        return {'key': child_key, 'reason': 'snapshot', 'label': 'snapshot HTML'}
+    if item_type == 'attachment':
+        return {'key': child_key, 'reason': 'non_pdf_attachment', 'label': 'anexo não-PDF'}
+    if item_type:
+        return {'key': child_key, 'reason': f'child:{item_type}', 'label': f'child {item_type}'}
+    return {'key': child_key, 'reason': 'unknown_child', 'label': 'child desconhecido'}
+
+
+def describe_unsafe_duplicate_children(summary: dict) -> str:
+    """Explica por que children do item duplicado bloqueiam a deleção."""
+    details = summary.get('unsafe_child_details') or []
+    if not details:
+        return ""
+    labels: list[str] = []
+    seen: set[str] = set()
+    for detail in details:
+        label = detail.get('label') or 'child preservado'
+        if label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+    if len(labels) == 1:
+        return f"item duplicado tem {labels[0]} filho"
+    return f"item duplicado tem filhos preservados: {', '.join(labels)}"
+
+
 def summarize_duplicate_children(
     children: List[dict],
     key_to_path: Dict[str, str] | None = None,
@@ -822,6 +870,7 @@ def summarize_duplicate_children(
         'pdf_hashes': set(),
         'pdf_filenames': [],
         'unsafe_children': [],
+        'unsafe_child_details': [],
         'missing_hash_attachments': [],
     }
 
@@ -829,7 +878,9 @@ def summarize_duplicate_children(
         data = child.get('data', {})
         child_key = child.get('key') or data.get('key')
         if not attachment_is_pdf(child):
-            summary['unsafe_children'].append(child_key or '?')
+            unsafe_detail = classify_unsafe_duplicate_child(child)
+            summary['unsafe_children'].append(unsafe_detail['key'])
+            summary['unsafe_child_details'].append(unsafe_detail)
             continue
 
         filename = get_filename_from_item(child)
@@ -880,8 +931,9 @@ def duplicate_item_can_be_deleted(
     """Decide se uma duplicata bibliográfica pode ser apagada sem perder conteúdo."""
     if duplicate_entry.get('relations'):
         return False, "item duplicado tem relações Zotero"
-    if duplicate_summary.get('unsafe_children'):
-        return False, "item duplicado tem notas ou anexos não-PDF"
+    unsafe_reason = describe_unsafe_duplicate_children(duplicate_summary)
+    if unsafe_reason:
+        return False, unsafe_reason
     if duplicate_summary.get('missing_hash_attachments'):
         return False, "não foi possível validar hash de todos os anexos PDF"
 

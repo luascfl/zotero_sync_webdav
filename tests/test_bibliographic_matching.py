@@ -236,6 +236,71 @@ class BibliographicMatchingTests(unittest.TestCase):
         self.assertFalse(can_delete)
         self.assertIn("sem DOI", reason)
 
+    def test_unsafe_duplicate_child_classifies_highlight_annotation(self):
+        detail = zsync.classify_unsafe_duplicate_child({
+            "key": "ANN1",
+            "data": {
+                "itemType": "annotation",
+                "annotationType": "highlight",
+            },
+        })
+
+        self.assertEqual(detail["reason"], "highlight")
+        self.assertEqual(detail["label"], "highlight")
+
+    def test_duplicate_cleanup_reports_highlight_block_reason(self):
+        duplicate = {"key": "DUP", "doi": "10.123/x", "relations": {}}
+        keeper = {"key": "KEEP", "doi": "10.123/x", "relations": {}}
+        summary = {
+            "pdf_hashes": {"same"},
+            "unsafe_children": ["ANN1"],
+            "unsafe_child_details": [{"key": "ANN1", "reason": "highlight", "label": "highlight"}],
+            "missing_hash_attachments": [],
+        }
+        keeper_summary = {
+            "pdf_hashes": {"same"},
+            "unsafe_children": [],
+            "unsafe_child_details": [],
+            "missing_hash_attachments": [],
+        }
+
+        can_delete, reason = zsync.duplicate_item_can_be_deleted(
+            duplicate,
+            keeper,
+            summary,
+            keeper_summary,
+        )
+
+        self.assertFalse(can_delete)
+        self.assertIn("highlight", reason)
+
+    def test_duplicate_cleanup_reports_snapshot_block_reason(self):
+        duplicate = {"key": "DUP", "doi": "10.123/x", "relations": {}}
+        keeper = {"key": "KEEP", "doi": "10.123/x", "relations": {}}
+        summary = {
+            "pdf_hashes": {"same"},
+            "unsafe_children": ["SNAP1"],
+            "unsafe_child_details": [{"key": "SNAP1", "reason": "snapshot", "label": "snapshot HTML"}],
+            "missing_hash_attachments": [],
+        }
+        keeper_summary = {
+            "pdf_hashes": {"same"},
+            "unsafe_children": [],
+            "unsafe_child_details": [],
+            "missing_hash_attachments": [],
+        }
+
+        can_delete, reason = zsync.duplicate_item_can_be_deleted(
+            duplicate,
+            keeper,
+            summary,
+            keeper_summary,
+        )
+
+        self.assertFalse(can_delete)
+        self.assertIn("snapshot HTML", reason)
+
+
 
 if __name__ == "__main__":
     unittest.main()
