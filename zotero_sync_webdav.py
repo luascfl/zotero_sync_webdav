@@ -561,11 +561,62 @@ def normalize_doi(value: str | None) -> str:
             doi = doi[len(prefix):]
     return doi.strip()
 
+COPY_PREFIX_RE = re.compile(r'^\s*(?:c[oó]pia\s+de|copy\s+of)\s+', re.IGNORECASE)
+COPY_NUMBER_SUFFIX_RE = re.compile(r'(?:\s*\(\d+\)|\s+1)\s*$')
+
+
+def canonical_duplicate_stem(stem: str) -> str:
+    """Remove marcadores comuns de cópia sem tratar o resultado como metadado final."""
+    cleaned = (stem or "").strip()
+    previous = None
+    while cleaned and previous != cleaned:
+        previous = cleaned
+        cleaned = COPY_PREFIX_RE.sub('', cleaned).strip()
+    cleaned = COPY_NUMBER_SUFFIX_RE.sub('', cleaned).strip()
+    return re.sub(r'\s+', ' ', cleaned).strip(" -_.")
+
+
+def canonical_duplicate_filename(filename: str) -> str:
+    """Retorna o nome sem marcadores como 'Cópia de', '(1)' ou sufixo ' 1'."""
+    basename = os.path.basename(filename or "")
+    if not basename:
+        return ""
+    suffix = ''.join(Path(basename).suffixes)
+    if suffix:
+        stem = basename[:-len(suffix)]
+    else:
+        stem = basename
+    canonical_stem = canonical_duplicate_stem(stem)
+    return f"{canonical_stem}{suffix}" if canonical_stem else basename
+
+
+def duplicate_name_key(filename: str) -> str:
+    """Chave agressiva para comparar nomes após remoção de marcadores de cópia."""
+    return normalize_aggressive(canonical_duplicate_filename(filename))
+
+
+def is_copy_variant_filename(filename: str) -> bool:
+    """Identifica nomes gerados por cópia do gerenciador de arquivos ou do drive."""
+    if not filename:
+        return False
+    return duplicate_name_key(filename) != normalize_aggressive(os.path.basename(filename))
+
+
+def choose_non_copy_canonical_name(left_name: str, right_name: str) -> str | None:
+    """Escolhe o nome sem marcador de cópia quando dois nomes representam o mesmo conteúdo."""
+    left_is_copy = is_copy_variant_filename(left_name)
+    right_is_copy = is_copy_variant_filename(right_name)
+    if left_is_copy == right_is_copy:
+        return None
+    return right_name if left_is_copy else left_name
+
+
 
 def filename_title_candidates(filename: str) -> List[str]:
     """Gera candidatos de título a partir de um nome de PDF no padrão Zotero."""
     stem = Path(os.path.basename(filename)).stem
-    raw_variants: list[str] = [stem]
+    duplicate_stem = Path(canonical_duplicate_filename(filename)).stem
+    raw_variants: list[str] = [stem, duplicate_stem]
 
     def clean(value: str) -> str:
         value = value.replace("_", " ")
@@ -1536,6 +1587,33 @@ def rename_webdav_file(src_path: str, desired_name: str) -> str:
         )
         return src_path
 
+def enforce_drive_canonical_name(
+    file_path: str,
+    desired_name: str,
+    file_hash: str,
+    stats: dict,
+) -> str:
+    """Renomeia ou remove uma cópia redundante no drive preservando o nome canônico."""
+    if not file_path or not desired_name:
+        return file_path
+
+    dest_path = os.path.join(os.path.dirname(file_path), desired_name)
+    if dest_path == file_path:
+        return file_path
+
+    if os.path.exists(dest_path):
+        if delete_redundant_webdav_duplicate(file_path, dest_path, canonical_hash=file_hash):
+            stats['pruned_drive_duplicates'] += 1
+            return dest_path
+        return file_path
+
+    new_path = rename_webdav_file(file_path, desired_name)
+    if new_path != file_path:
+        stats['renamed_webdav'] += 1
+        return new_path
+    return file_path
+
+
 
 def register_local_hash(
     hash_index: Dict[str, List[dict]],
@@ -1801,12 +1879,27 @@ def materialize_zotero_attachments_to_drive(
             if drive_name == filename:
                 continue
 
-            if zotero_mtime > drive_mtime:
-                new_path = rename_webdav_file(drive_path, filename)
+            copy_preferred_name = choose_non_copy_canonical_name(drive_name, filename)
+            if copy_preferred_name == filename:
+                new_path = enforce_drive_canonical_name(drive_path, filename, local_hash, stats)
                 if new_path != drive_path:
-                    stats['renamed_webdav'] += 1
                     drive_entry['path'] = new_path
-                    drive_entry['filename'] = filename
+                    drive_entry['filename'] = os.path.basename(new_path)
+                    drive_entry['mtime'] = os.path.getmtime(new_path)
+                    drive_name_index[norm] = new_path
+                    drive_aggressive_index[norm_aggressive] = new_path
+                    logging.info("[ZOT->DRIVE] Nome de cópia no drive consolidado pelo canônico Zotero: '%s'.", filename)
+            elif copy_preferred_name == drive_name:
+                updated_path = rename_local_attachment(zot, key, local_path, drive_name)
+                if updated_path != local_path:
+                    key_to_path[key] = updated_path
+                    stats['renamed_local'] += 1
+                    logging.info("[ZOT->DRIVE] Zotero atualizado pelo nome não-cópia do drive: '%s'.", drive_name)
+            elif zotero_mtime > drive_mtime:
+                new_path = enforce_drive_canonical_name(drive_path, filename, local_hash, stats)
+                if new_path != drive_path:
+                    drive_entry['path'] = new_path
+                    drive_entry['filename'] = os.path.basename(new_path)
                     drive_entry['mtime'] = os.path.getmtime(new_path)
                     drive_name_index[norm] = new_path
                     drive_aggressive_index[norm_aggressive] = new_path
@@ -2143,7 +2236,37 @@ def run_sync_mode():
                         local_copy_mtime,
                     )
 
-                    if webdav_mtime > zotero_mtime:
+                    copy_preferred_name = choose_non_copy_canonical_name(webdav_name, zotero_name)
+                    if copy_preferred_name == zotero_name:
+                        if local_copy_name != zotero_name:
+                            updated_path = rename_local_attachment(zot, canonical_key, canonical_path, zotero_name)
+                            if updated_path != canonical_path:
+                                entry['path'] = updated_path
+                                entry['filename'] = zotero_name
+                                key_to_path[canonical_key] = updated_path
+                                stats['renamed_local'] += 1
+
+                        new_path = enforce_drive_canonical_name(file_path, zotero_name, file_hash, stats)
+                        if new_path != file_path:
+                            file_path = new_path
+                            file_name = os.path.basename(new_path)
+                            logging.info(
+                                "[CASO 3] Nome de cópia no drive consolidado para canônico do Zotero: '%s'.",
+                                zotero_name,
+                            )
+                        canonical_name = zotero_name
+                    elif copy_preferred_name == webdav_name:
+                        updated_path = rename_local_attachment(zot, canonical_key, canonical_path, webdav_name)
+                        if updated_path != canonical_path:
+                            entry['path'] = updated_path
+                            entry['filename'] = webdav_name
+                            key_to_path[canonical_key] = updated_path
+                            entry_info['original'] = webdav_name
+                            entry_info['dateModified'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+                            stats['renamed_local'] += 1
+                            logging.info("[CASO 3] Zotero atualizado para nome não-cópia do drive: '%s'.", webdav_name)
+                        canonical_name = webdav_name
+                    elif webdav_mtime > zotero_mtime:
                         updated_path = rename_local_attachment(zot, canonical_key, canonical_path, webdav_name)
                         if updated_path != canonical_path:
                             entry['path'] = updated_path
@@ -2167,19 +2290,11 @@ def run_sync_mode():
                                 key_to_path[canonical_key] = updated_path
                                 stats['renamed_local'] += 1
 
-                        canonical_drive_path = os.path.join(os.path.dirname(file_path), zotero_name)
-                        if canonical_drive_path != file_path and os.path.exists(canonical_drive_path):
-                            if delete_redundant_webdav_duplicate(file_path, canonical_drive_path):
-                                file_path = canonical_drive_path
-                                file_name = zotero_name
-                                stats['pruned_drive_duplicates'] += 1
-                        else:
-                            new_path = rename_webdav_file(file_path, zotero_name)
-                            if new_path != file_path:
-                                file_path = new_path
-                                file_name = zotero_name
-                                stats['renamed_webdav'] += 1
-                                logging.info("[CASO 3] Drive atualizado para o nome mais recente do Zotero: '%s'.", zotero_name)
+                        new_path = enforce_drive_canonical_name(file_path, zotero_name, file_hash, stats)
+                        if new_path != file_path:
+                            file_path = new_path
+                            file_name = os.path.basename(new_path)
+                            logging.info("[CASO 3] Drive atualizado para o nome mais recente do Zotero: '%s'.", zotero_name)
                     else:
                         stats['mtime_ties'] += 1
                         tie_conflicts.append({
@@ -2234,6 +2349,19 @@ def run_sync_mode():
                     candidate_summary,
                 )
                 continue
+
+            if is_copy_variant_filename(file_name) and not parent_key:
+                existing_filenames.pop(norm_local, None)
+                existing_filenames_aggressive.pop(norm_local_aggressive, None)
+                stats['errors'] += 1
+                stats['blocked_duplicate_risk'] += 1
+                logging.error(
+                    "[DUP-RISK] '%s' tem marcador de cópia e não teve pai bibliográfico único. "
+                    "Upload top-level bloqueado para evitar duplicata persistente no Zotero e no drive.",
+                    file_name,
+                )
+                continue
+
 
 
             try:

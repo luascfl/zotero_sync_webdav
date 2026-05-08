@@ -97,6 +97,78 @@ class BibliographicMatchingTests(unittest.TestCase):
         self.assertEqual(parent["key"], "BOOK1234")
         self.assertEqual(len(candidates), 1)
 
+    def test_copy_prefix_is_removed_before_parent_matching(self):
+        index = zsync.build_bibliographic_parent_index([
+            make_item("PARENT1", "Arquivo X e sua teoria principal")
+        ])
+
+        parent, candidates = zsync.select_parent_for_new_attachment(
+            "Cópia de Arquivo X e sua teoria principal.pdf",
+            index,
+        )
+
+        self.assertEqual(parent["key"], "PARENT1")
+        self.assertEqual(len(candidates), 1)
+
+    def test_copy_variant_never_beats_clean_name(self):
+        preferred = zsync.choose_non_copy_canonical_name(
+            "Cópia de Arquivo X.pdf",
+            "Arquivo X - Autor 2020.pdf",
+        )
+
+        self.assertEqual(preferred, "Arquivo X - Autor 2020.pdf")
+
+    def test_numbered_copy_variant_does_not_become_canonical(self):
+        preferred = zsync.choose_non_copy_canonical_name(
+            "Arquivo X (1).pdf",
+            "Arquivo X.pdf",
+        )
+
+        self.assertEqual(preferred, "Arquivo X.pdf")
+
+    def test_enforce_drive_canonical_name_deletes_same_hash_copy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            canonical = folder / "Arquivo X.pdf"
+            duplicate = folder / "Cópia de Arquivo X.pdf"
+            content = b"same pdf content"
+            canonical.write_bytes(content)
+            duplicate.write_bytes(content)
+            stats = {"pruned_drive_duplicates": 0, "renamed_webdav": 0}
+            duplicate_hash = zsync.compute_sha256(str(duplicate), cache={})
+
+            result = zsync.enforce_drive_canonical_name(
+                str(duplicate),
+                canonical.name,
+                duplicate_hash,
+                stats,
+            )
+
+            self.assertEqual(Path(result), canonical)
+            self.assertTrue(canonical.exists())
+            self.assertFalse(duplicate.exists())
+            self.assertEqual(stats["pruned_drive_duplicates"], 1)
+
+    def test_enforce_drive_canonical_name_renames_copy_when_destination_absent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            duplicate = folder / "Cópia de Arquivo X.pdf"
+            duplicate.write_bytes(b"same pdf content")
+            stats = {"pruned_drive_duplicates": 0, "renamed_webdav": 0}
+            duplicate_hash = zsync.compute_sha256(str(duplicate), cache={})
+
+            result = zsync.enforce_drive_canonical_name(
+                str(duplicate),
+                "Arquivo X.pdf",
+                duplicate_hash,
+                stats,
+            )
+
+            self.assertEqual(Path(result), folder / "Arquivo X.pdf")
+            self.assertTrue((folder / "Arquivo X.pdf").exists())
+            self.assertFalse(duplicate.exists())
+            self.assertEqual(stats["renamed_webdav"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
