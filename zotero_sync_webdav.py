@@ -16,10 +16,12 @@ Workflow real deste script:
    - caso 1: mesmo nome e mesmo conteúdo, então já está sincronizado;
    - caso 2: mesmo nome e conteúdo diferente, então o drive passou a ser a versão
      mais recente e a cópia local do Zotero é atualizada;
-   - caso 3: mesmo conteúdo e nomes diferentes, então há conflito de nome e o lado
-     mais recente por mtime define o título canônico temporário;
+   - caso 3: mesmo conteúdo e nomes diferentes, então o nome canônico por metadados
+     do item pai vence. Quando não há metadados suficientes, usa-se mtime como
+     fallback conservador;
    - caso 4: o arquivo existe no drive, mas não existe no Zotero, então ele é enviado
-     ao Zotero e também copiado para ~/Zotero/storage;
+     ao Zotero, anexado a um pai bibliográfico único quando possível, renomeado pelo
+     padrão canônico e também copiado para ~/Zotero/storage;
    - caso 5: o Zotero conhece o anexo, mas a cópia local em ~/Zotero/storage está
      ausente, então a cópia local é recriada a partir do drive.
 6. Após a varredura do drive, reconcilia Zotero -> drive: anexos PDF que existem
@@ -29,11 +31,12 @@ Workflow real deste script:
 Regras operacionais definidas pelo usuário para conflitos:
 - presença é bidirecional: drive sem Zotero deve ir para o Zotero; Zotero sem drive
   deve ser materializado no drive automaticamente;
-- em hash_match com nomes diferentes, o lado com mtime mais recente vira a fonte de
-  verdade temporária para o título;
-- se o Zotero estiver mais recente, renomeia-se o drive;
-- se o drive estiver mais recente, modifica-se o Zotero para refletir o nome do drive,
-  porque esse foi o ajuste manual mais recente do usuário.
+- anexos PDF com item bibliográfico pai devem usar o padrão
+  "título - sobrenome ano.pdf" no Zotero, no drive e no storage local;
+- marcadores de cópia como "Cópia de", "Copy of" e "(1)" não podem vencer como nome
+  canônico;
+- em hash_match sem metadados bibliográficos suficientes, o lado com mtime mais
+  recente vira a fonte de verdade temporária para o título.
 
 Limites atuais importantes:
 - a reconciliação bidirecional cobre nomes, hashes, cópia local e materialização de
@@ -561,6 +564,21 @@ def normalize_doi(value: str | None) -> str:
             doi = doi[len(prefix):]
     return doi.strip()
 
+INVALID_FILENAME_CHARS_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+CANONICAL_FILENAME_MAX_BYTES = 240
+CANONICAL_TITLE_MAX_BYTES = 180
+AUTHOR_CREATOR_TYPES = {
+    'author',
+    'bookAuthor',
+    'podcaster',
+    'programmer',
+    'cartographer',
+    'presenter',
+    'interviewee',
+}
+
+
+
 COPY_PREFIX_RE = re.compile(r'^\s*(?:c[oó]pia\s+de|copy\s+of)\s+', re.IGNORECASE)
 COPY_NUMBER_SUFFIX_RE = re.compile(r'(?:\s*\(\d+\)|\s+1)\s*$')
 
@@ -609,6 +627,84 @@ def choose_non_copy_canonical_name(left_name: str, right_name: str) -> str | Non
     if left_is_copy == right_is_copy:
         return None
     return right_name if left_is_copy else left_name
+
+def truncate_utf8(value: str, max_bytes: int) -> str:
+    """Trunca texto sem cortar sequência UTF-8 no meio."""
+    if len(value.encode('utf-8')) <= max_bytes:
+        return value
+    encoded = value.encode('utf-8')[:max_bytes]
+    return encoded.decode('utf-8', errors='ignore').rstrip()
+
+
+def sanitize_filename_component(value: str, max_bytes: int) -> str:
+    """Normaliza um componente de nome de arquivo preservando texto legível."""
+    if not value:
+        return ""
+    normalized = unicodedata.normalize('NFC', str(value))
+    normalized = INVALID_FILENAME_CHARS_RE.sub(' ', normalized)
+    normalized = normalized.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+    normalized = re.sub(r'\s+', ' ', normalized).strip(" .-_")
+    normalized = canonical_duplicate_stem(normalized)
+    return truncate_utf8(normalized, max_bytes).strip(" .-_")
+
+
+def creator_surname(creator: dict) -> str:
+    """Extrai sobrenome de um creator Zotero."""
+    last_name = sanitize_filename_component(creator.get('lastName') or '', 48)
+    if last_name:
+        return last_name
+    full_name = sanitize_filename_component(creator.get('name') or '', 80)
+    if not full_name:
+        return ""
+    if ',' in full_name:
+        return sanitize_filename_component(full_name.split(',', 1)[0], 48)
+    parts = [part for part in full_name.split() if part]
+    return sanitize_filename_component(parts[-1], 48) if parts else ""
+
+
+def primary_creator_surname(item_data: dict) -> str:
+    """Escolhe o sobrenome principal para o padrão 'título - sobrenome ano'."""
+    creators = item_data.get('creators') or []
+    preferred = [
+        creator for creator in creators
+        if creator.get('creatorType') in AUTHOR_CREATOR_TYPES
+    ]
+    for creator in preferred or creators:
+        surname = creator_surname(creator)
+        if surname:
+            return surname
+    return ""
+
+
+def extract_bibliographic_year(item_data: dict) -> str:
+    """Extrai o primeiro ano bibliográfico plausível dos campos do item."""
+    for field in ('date', 'dateEnacted', 'issueDate', 'filingDate'):
+        value = item_data.get(field)
+        if not value:
+            continue
+        match = re.search(r'\b((?:18|19|20)\d{2})\b', str(value))
+        if match:
+            return match.group(1)
+    return ""
+
+
+def canonical_parent_pdf_filename(parent_item: dict | None) -> str | None:
+    """Gera 'título - sobrenome ano.pdf' a partir do item bibliográfico pai."""
+    if not parent_item:
+        return None
+    data = parent_item.get('data', parent_item)
+    title = sanitize_filename_component(data.get('title') or '', CANONICAL_TITLE_MAX_BYTES)
+    if not title:
+        return None
+    surname = primary_creator_surname(data)
+    year = extract_bibliographic_year(data)
+    suffix = " ".join(part for part in (surname, year) if part)
+    if not suffix:
+        return None
+    stem = sanitize_filename_component(f"{title} - {suffix}", CANONICAL_FILENAME_MAX_BYTES - len('.pdf'))
+    if not stem:
+        return None
+    return f"{stem}.pdf"
 
 
 
@@ -976,7 +1072,7 @@ def merge_duplicate_metadata_into_keeper(
     if not keeper_item:
         return True
 
-    data = keeper_item.get('data', {})
+    data = dict(keeper_item.get('data') or keeper_item)
     changed = False
 
     current_collections = list(data.get('collections') or [])
@@ -1015,7 +1111,9 @@ def merge_duplicate_metadata_into_keeper(
         merged_relations[predicate] = combined if len(combined) > 1 else combined[0]
     if changed:
         data['relations'] = merged_relations
-        zot.update_item(keeper_item)
+        if keeper_item.get('data') is not None:
+            keeper_item['data'] = data
+        zot.update_item(data)
     return True
 
 
@@ -1575,7 +1673,7 @@ def cleanup_failed_attachment_upload(zot: zotero.Zotero, source_path: str) -> in
     """Remove anexos preliminares quebrados após falha de upload Pyzotero.
 
     Quando o Pyzotero cria o item preliminar no Zotero, mas o upload S3 falha,
-    podem sobrar anexos sem pai, sem contentType e com `filename` derivado do
+    podem sobrar anexos sem conteúdo, com ou sem pai, e com `filename` derivado do
     caminho absoluto local. Esses itens não representam um anexo funcional e
     causam duplicatas em execuções futuras.
     """
@@ -1605,7 +1703,7 @@ def cleanup_failed_attachment_upload(zot: zotero.Zotero, source_path: str) -> in
             continue
         if data.get("filename") != path_filename:
             continue
-        if data.get("parentItem") or data.get("contentType"):
+        if data.get("contentType"):
             continue
         if data.get("linkMode") != "imported_file":
             continue
@@ -2005,6 +2103,58 @@ def register_local_hash(
     key_to_path[key] = file_path
 
 
+def update_zotero_attachment_filename(
+    zot: zotero.Zotero,
+    key: str,
+    new_filename: str,
+    item: dict | None = None,
+) -> bool:
+    """Atualiza title/filename do anexo no Zotero."""
+    if not key or not new_filename:
+        return False
+    try:
+        zotero_item = item if item and item.get('data') else zot.item(key)
+        item_data = dict(zotero_item.get('data') or zotero_item)
+        current_name = os.path.basename(get_filename_from_item({'data': item_data}))
+        current_title = item_data.get('title')
+        if item_data.get('linkMode') == 'linked_file':
+            if current_name == new_filename and current_title == new_filename:
+                return False
+        elif current_name == new_filename or current_title == new_filename:
+            return False
+        if item_data.get('linkMode') == 'linked_file':
+            item_data.pop('filename', None)
+            item_data['title'] = new_filename
+            item_data['path'] = os.path.join(TARGET_FOLDER, new_filename)
+        else:
+            item_data['filename'] = new_filename
+            item_data['title'] = new_filename
+            if item_data.get('path', '').startswith('storage:'):
+                item_data['path'] = f"storage:{new_filename}"
+        zot.update_item(item_data)
+        latest = zot.item(key)
+        latest_name = os.path.basename(get_filename_from_item(latest))
+        latest_title = latest.get('data', {}).get('title')
+        if latest_name != new_filename and latest_title != new_filename:
+            logging.warning(
+                "[RENOMEIO] Zotero aceitou atualização do anexo %s, mas o nome retornado ainda é '%s'.",
+                key,
+                latest_name or latest_title,
+            )
+            return False
+        if item is not None:
+            target_data = item.setdefault('data', {})
+            target_data['filename'] = latest.get('data', {}).get('filename')
+            target_data['title'] = latest.get('data', {}).get('title')
+            target_data['path'] = latest.get('data', {}).get('path')
+            target_data['dateModified'] = latest.get('data', {}).get('dateModified')
+        logging.info("[RENOMEIO] Anexo %s atualizado para '%s'.", key, new_filename)
+        return True
+    except Exception as exc:
+        logging.warning("[RENOMEIO] Falha ao atualizar metadados do anexo %s: %s", key, exc)
+        return False
+
+
 def rename_local_attachment(
     zot: zotero.Zotero,
     key: str,
@@ -2016,7 +2166,14 @@ def rename_local_attachment(
         return current_path
 
     current_name = os.path.basename(current_path)
+    try:
+        item = zot.item(key)
+    except Exception as exc:
+        logging.warning("[RENOMEIO] Falha ao obter anexo %s: %s", key, exc)
+        return current_path
+
     if current_name == new_filename:
+        update_zotero_attachment_filename(zot, key, new_filename, item)
         return current_path
 
     dest_path = os.path.join(os.path.dirname(current_path), new_filename)
@@ -2029,11 +2186,6 @@ def rename_local_attachment(
         )
         return current_path
 
-    try:
-        item = zot.item(key)
-    except Exception as exc:
-        logging.warning("[RENOMEIO] Falha ao obter anexo %s: %s", key, exc)
-        return current_path
 
     try:
         os.rename(current_path, dest_path)
@@ -2048,17 +2200,119 @@ def rename_local_attachment(
 
     rename_cache_entry(HASH_CACHE, current_path, dest_path)
 
-    try:
-        item_data = item.get('data', {})
-        item_data['filename'] = new_filename
-        item_data['title'] = new_filename
-        item['data'] = item_data
-        zot.update_item(item)
-        logging.info("[RENOMEIO] Anexo %s atualizado para '%s'.", key, new_filename)
-    except Exception as exc:
-        logging.warning("[RENOMEIO] Falha ao atualizar metadados do anexo %s: %s", key, exc)
+    update_zotero_attachment_filename(zot, key, new_filename, item)
 
     return dest_path
+
+
+def build_item_by_key(items: List[dict]) -> dict[str, dict]:
+    """Indexa itens Zotero por key."""
+    indexed: dict[str, dict] = {}
+    for item in items:
+        data = item.get('data', {})
+        key = item.get('key') or data.get('key')
+        if key:
+            indexed[key] = item
+    return indexed
+
+
+def attachment_metadata_filename(
+    attachment_key: str,
+    attachment_items_by_key: dict[str, dict],
+    parent_items_by_key: dict[str, dict],
+) -> str | None:
+    """Retorna o nome canônico por metadados para um anexo, quando existir."""
+    attachment = attachment_items_by_key.get(attachment_key)
+    parent_key = (attachment or {}).get('data', {}).get('parentItem')
+    return canonical_parent_pdf_filename(parent_items_by_key.get(parent_key))
+
+
+def choose_hash_match_entry(
+    hash_matches: list[dict],
+    drive_name: str,
+    attachment_items_by_key: dict[str, dict],
+    parent_items_by_key: dict[str, dict],
+) -> dict:
+    """Prefere match cujo anexo tenha nome canônico derivado de metadados."""
+    if not hash_matches:
+        return {}
+
+    drive_norm = normalize_filename(drive_name)
+    scored: list[tuple[int, int, float, str, dict]] = []
+    for entry in hash_matches:
+        key = entry.get('key') or ''
+        desired = attachment_metadata_filename(key, attachment_items_by_key, parent_items_by_key)
+        desired_norm = normalize_filename(desired or '')
+        if desired_norm and desired_norm == drive_norm:
+            metadata_score = 2
+        elif desired_norm:
+            metadata_score = 1
+        else:
+            metadata_score = 0
+        copy_score = 0 if is_copy_variant_filename(entry.get('filename') or '') else 1
+        modified = 0.0
+        parsed = parse_zotero_date(((entry.get('info') or {}).get('dateModified') or ''))
+        if parsed:
+            modified = parsed.timestamp()
+        scored.append((metadata_score, copy_score, modified, key, entry))
+
+    return max(scored, key=lambda row: row[:4])[-1]
+
+
+def enforce_attachment_metadata_filenames(
+    zot: zotero.Zotero,
+    attachments: List[dict],
+    parent_items_by_key: dict[str, dict],
+    stats: dict,
+) -> bool:
+    """Força anexos PDF com pai a usarem 'título - sobrenome ano.pdf'."""
+    stats.setdefault('canonical_attachment_names', 0)
+    changed = False
+
+    for item in attachments:
+        data = item.get('data', {})
+        key = item.get('key') or data.get('key')
+        parent_key = data.get('parentItem')
+        if not key or not parent_key or not attachment_is_pdf(item):
+            continue
+
+        desired_name = canonical_parent_pdf_filename(parent_items_by_key.get(parent_key))
+        if not desired_name:
+            continue
+
+        current_name = os.path.basename(get_filename_from_item(item))
+        if current_name == desired_name:
+            continue
+
+        changed_this_item = False
+        local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, key))
+        if local_path and os.path.exists(local_path):
+            local_name = os.path.basename(local_path)
+            if local_name != desired_name:
+                updated_path = rename_local_attachment(zot, key, local_path, desired_name)
+                if updated_path != local_path:
+                    stats['renamed_local'] += 1
+                    changed_this_item = True
+            else:
+                changed_this_item = update_zotero_attachment_filename(zot, key, desired_name)
+        else:
+            changed_this_item = update_zotero_attachment_filename(zot, key, desired_name, item)
+
+        if changed_this_item:
+            data['filename'] = desired_name
+            data['title'] = desired_name
+            item['data'] = data
+            stats['canonical_attachment_names'] += 1
+            changed = True
+            logging.info(
+                "[NOME-CANONICO] Anexo %s normalizado por metadados do pai %s: '%s' -> '%s'.",
+                key,
+                parent_key,
+                current_name,
+                desired_name,
+            )
+
+    return changed
 
 
 def copy_to_local_storage(src_path: str, attachment_key: str, known_hash: str | None = None) -> str | None:
@@ -2184,6 +2438,7 @@ def build_drive_pdf_index(directory: str, stats: dict | None = None) -> tuple[di
 def materialize_zotero_attachments_to_drive(
     zot: zotero.Zotero,
     attachments: List[dict],
+    parent_items_by_key: dict[str, dict],
     drive_name_index: dict,
     drive_aggressive_index: dict,
     drive_hash_index: dict,
@@ -2193,6 +2448,15 @@ def materialize_zotero_attachments_to_drive(
     ) -> None:
     """Materializa no drive PDFs conhecidos pelo Zotero que não existem no drive."""
     seen_keys: set[str] = set()
+    protected_canonical_names: set[str] = set()
+    for attachment in attachments:
+        attachment_data = attachment.get('data', {})
+        desired = canonical_parent_pdf_filename(
+            parent_items_by_key.get(attachment_data.get('parentItem'))
+        )
+        if desired:
+            protected_canonical_names.add(normalize_filename(desired))
+
 
     for item in attachments:
         data = item.get('data', {})
@@ -2205,6 +2469,11 @@ def materialize_zotero_attachments_to_drive(
         if not filename or not filename.lower().endswith('.pdf'):
             continue
         filename = os.path.basename(filename)
+        metadata_filename = canonical_parent_pdf_filename(
+            parent_items_by_key.get(data.get('parentItem'))
+        )
+        if metadata_filename:
+            filename = metadata_filename
 
         norm = normalize_filename(filename)
         norm_aggressive = normalize_aggressive(filename)
@@ -2243,7 +2512,95 @@ def materialize_zotero_attachments_to_drive(
 
             if drive_name == filename:
                 continue
+            drive_norm = normalize_filename(drive_name)
+            if (
+                metadata_filename
+                and drive_norm in protected_canonical_names
+                and drive_norm != normalize_filename(metadata_filename)
+            ):
+                dest_path = os.path.join(TARGET_FOLDER, metadata_filename)
+                if os.path.exists(dest_path):
+                    dest_hash = compute_sha256(dest_path)
+                    if dest_hash and dest_hash == local_hash:
+                        logging.info(
+                            "[ZOT->DRIVE] Nome canônico distinto já existe no drive para hash compartilhado: '%s'.",
+                            metadata_filename,
+                        )
+                        continue
+                    stats['errors'] += 1
+                    logging.warning(
+                        "[ZOT->DRIVE] Nome canônico distinto colide com conteúdo diferente. Não sobrescrito: %s",
+                        dest_path,
+                    )
+                    continue
+                try:
+                    shutil.copy2(local_path, dest_path)
+                    set_mtime_from_zotero_date(dest_path, data.get('dateModified'))
+                    set_cached_hash(dest_path, local_hash, HASH_CACHE)
+                    metadata_norm = normalize_filename(metadata_filename)
+                    metadata_norm_aggressive = normalize_aggressive(metadata_filename)
+                    drive_name_index[metadata_norm] = dest_path
+                    drive_aggressive_index[metadata_norm_aggressive] = dest_path
+                    drive_hash_index.setdefault(local_hash, []).append({
+                        'path': dest_path,
+                        'filename': metadata_filename,
+                        'mtime': os.path.getmtime(dest_path),
+                    })
+                    stats['materialized_drive'] += 1
+                    logging.info(
+                        "[ZOT->DRIVE] Hash compartilhado materializado também com nome canônico deste anexo: '%s'.",
+                        metadata_filename,
+                    )
+                except Exception as exc:
+                    stats['errors'] += 1
+                    logging.error(
+                        "[ZOT->DRIVE] Falha ao materializar nome canônico distinto '%s': %s",
+                        metadata_filename,
+                        exc,
+                    )
+                continue
 
+
+            if metadata_filename:
+                current_zotero_name = os.path.basename(get_filename_from_item(item))
+                if current_zotero_name != metadata_filename:
+                    if update_zotero_attachment_filename(zot, key, metadata_filename, item):
+                        stats['canonical_attachment_names'] += 1
+                    data['filename'] = metadata_filename
+                    data['title'] = metadata_filename
+                if os.path.basename(local_path) != metadata_filename:
+                    updated_path = rename_local_attachment(zot, key, local_path, metadata_filename)
+                    if updated_path != local_path:
+                        key_to_path[key] = updated_path
+                        local_path = updated_path
+                        stats['renamed_local'] += 1
+                new_path = enforce_drive_canonical_name(drive_path, metadata_filename, local_hash, stats)
+                if new_path != drive_path:
+                    drive_entry['path'] = new_path
+                    drive_entry['filename'] = os.path.basename(new_path)
+                    drive_entry['mtime'] = os.path.getmtime(new_path)
+                    drive_name_index[norm] = new_path
+                    drive_aggressive_index[norm_aggressive] = new_path
+                    logging.info("[ZOT->DRIVE] Drive consolidado pelo nome canônico de metadados: '%s'.", metadata_filename)
+                continue
+            if not metadata_filename and normalize_filename(drive_name) in protected_canonical_names:
+                current_zotero_name = os.path.basename(get_filename_from_item(item))
+                if current_zotero_name != drive_name:
+                    if update_zotero_attachment_filename(zot, key, drive_name, item):
+                        stats['canonical_attachment_names'] += 1
+                    data['filename'] = drive_name
+                    data['title'] = drive_name
+                if os.path.basename(local_path) != drive_name:
+                    updated_path = rename_local_attachment(zot, key, local_path, drive_name)
+                    if updated_path != local_path:
+                        key_to_path[key] = updated_path
+                        local_path = updated_path
+                        stats['renamed_local'] += 1
+                logging.info(
+                    "[ZOT->DRIVE] Nome protegido por metadados de outro anexo preservado para hash compartilhado: '%s'.",
+                    drive_name,
+                )
+                continue
             copy_preferred_name = choose_non_copy_canonical_name(drive_name, filename)
             if copy_preferred_name == filename:
                 new_path = enforce_drive_canonical_name(drive_path, filename, local_hash, stats)
@@ -2378,6 +2735,7 @@ def run_sync_mode():
         'auto_removed_bibliographic_duplicates': 0,
         'auto_duplicate_cleanup_skipped': 0,
         'merged_duplicate_metadata': 0,
+        'canonical_attachment_names': 0,
     }
     tie_conflicts: list[dict[str, str]] = []
 
@@ -2418,6 +2776,7 @@ def run_sync_mode():
         bibliographic_items = collect_all_bibliographic_items(zot, stats)
         bibliographic_parent_index = build_bibliographic_parent_index(bibliographic_items)
         stats['zotero_bibliographic_indexed'] = len(bibliographic_parent_index)
+        parent_items_by_key = build_item_by_key(bibliographic_items)
         print(
             f"✓ {stats['zotero_bibliographic_scanned']} itens bibliográficos escaneados | "
             f"{stats['zotero_bibliographic_indexed']} títulos candidatos indexados."
@@ -2431,6 +2790,23 @@ def run_sync_mode():
         )
         finalize_execution(stats)
         return
+
+    canonical_names_changed = enforce_attachment_metadata_filenames(
+        zot,
+        all_attachments,
+        parent_items_by_key,
+        stats,
+    )
+    if canonical_names_changed:
+        logging.info("[NOME-CANONICO] Recarregando anexos após normalização por metadados.")
+        (
+            all_attachments,
+            existing_filenames,
+            existing_filenames_aggressive,
+        ) = collect_all_attachments(zot, stats)
+        stats['zotero_unique_filenames'] = len(existing_filenames)
+
+    attachment_items_by_key = build_item_by_key(all_attachments)
 
 
     hash_index, key_to_path = build_local_storage_index(existing_filenames)
@@ -2579,7 +2955,12 @@ def run_sync_mode():
             hash_matches = hash_index.get(file_hash, [])
             if hash_matches:
                 # CASO 3: hash encontrado, nome diferente → reconciliar nomes pelo mtime
-                entry = hash_matches[0]
+                entry = choose_hash_match_entry(
+                    hash_matches,
+                    file_name,
+                    attachment_items_by_key,
+                    parent_items_by_key,
+                )
                 canonical_key = entry['key']
                 canonical_path = entry.get('path')
                 webdav_name = file_name
@@ -2605,8 +2986,46 @@ def run_sync_mode():
                         local_copy_mtime,
                     )
 
-                    copy_preferred_name = choose_non_copy_canonical_name(webdav_name, zotero_name)
-                    if copy_preferred_name == zotero_name:
+                    metadata_canonical_applied = False
+                    attachment_item = attachment_items_by_key.get(canonical_key)
+                    attachment_parent_key = (
+                        (attachment_item or {}).get('data', {}).get('parentItem')
+                    )
+                    metadata_name = canonical_parent_pdf_filename(
+                        parent_items_by_key.get(attachment_parent_key)
+                    )
+                    if metadata_name:
+                        if local_copy_name != metadata_name:
+                            updated_path = rename_local_attachment(zot, canonical_key, canonical_path, metadata_name)
+                            if updated_path != canonical_path:
+                                entry['path'] = updated_path
+                                entry['filename'] = metadata_name
+                                key_to_path[canonical_key] = updated_path
+                                canonical_path = updated_path
+                                local_copy_name = metadata_name
+                                stats['renamed_local'] += 1
+                        if zotero_name != metadata_name:
+                            if update_zotero_attachment_filename(zot, canonical_key, metadata_name, attachment_item):
+                                stats['canonical_attachment_names'] += 1
+                            zotero_name = metadata_name
+                            if attachment_item:
+                                attachment_item.setdefault('data', {})['filename'] = metadata_name
+                                attachment_item.setdefault('data', {})['title'] = metadata_name
+                        new_path = enforce_drive_canonical_name(file_path, metadata_name, file_hash, stats)
+                        if new_path != file_path:
+                            file_path = new_path
+                            file_name = os.path.basename(new_path)
+                            logging.info(
+                                "[CASO 3] Drive atualizado para nome canônico por metadados: '%s'.",
+                                metadata_name,
+                            )
+                        canonical_name = metadata_name
+                        metadata_canonical_applied = True
+
+                    copy_preferred_name = None if metadata_canonical_applied else choose_non_copy_canonical_name(webdav_name, zotero_name)
+                    if metadata_canonical_applied:
+                        pass
+                    elif copy_preferred_name == zotero_name:
                         if local_copy_name != zotero_name:
                             updated_path = rename_local_attachment(zot, canonical_key, canonical_path, zotero_name)
                             if updated_path != canonical_path:
@@ -2769,14 +3188,47 @@ def run_sync_mode():
                     if parent_key:
                         stats['attached_to_existing_parent'] += 1
                     info = {'original': file_name, 'key': new_key, 'dateModified': None}
-                    existing_filenames[norm_local] = info
-                    existing_filenames_aggressive[norm_local_aggressive] = info
                     copy_outcome = copy_to_local_storage(file_path, new_key, file_hash)
                     if copy_outcome == "copied":
                         stats['local_copies'] += 1
                     elif copy_outcome is None:
                         logging.warning("[COPIA-LOCAL] Não foi possível copiar '%s'.", file_name)
                     local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, new_key))
+
+                    desired_new_name = (
+                        canonical_parent_pdf_filename(parent_items_by_key.get(parent_key))
+                        if parent_key else None
+                    )
+                    if desired_new_name and desired_new_name != file_name:
+                        metadata_changed = False
+                        if local_path and os.path.exists(local_path):
+                            if os.path.basename(local_path) != desired_new_name:
+                                updated_local = rename_local_attachment(zot, new_key, local_path, desired_new_name)
+                                if updated_local != local_path:
+                                    local_path = updated_local
+                                    stats['renamed_local'] += 1
+                                    metadata_changed = True
+                                else:
+                                    metadata_changed = update_zotero_attachment_filename(zot, new_key, desired_new_name)
+                            else:
+                                metadata_changed = update_zotero_attachment_filename(zot, new_key, desired_new_name)
+                        else:
+                            metadata_changed = update_zotero_attachment_filename(zot, new_key, desired_new_name)
+                        if metadata_changed:
+                            stats['canonical_attachment_names'] += 1
+
+                        new_drive_path = enforce_drive_canonical_name(file_path, desired_new_name, file_hash, stats)
+                        if new_drive_path != file_path:
+                            existing_filenames.pop(norm_local, None)
+                            existing_filenames_aggressive.pop(norm_local_aggressive, None)
+                            file_path = new_drive_path
+                            file_name = os.path.basename(file_path)
+                            norm_local = normalize_filename(file_name)
+                            norm_local_aggressive = normalize_aggressive(file_name)
+                        info['original'] = file_name
+
+                    existing_filenames[norm_local] = info
+                    existing_filenames_aggressive[norm_local_aggressive] = info
                     if local_path and os.path.exists(local_path):
                         register_local_hash(hash_index, key_to_path, new_key, local_path, info)
                     if parent_key:
@@ -2841,6 +3293,7 @@ def run_sync_mode():
         materialize_zotero_attachments_to_drive(
             zot,
             all_attachments,
+            parent_items_by_key,
             drive_name_index,
             drive_aggressive_index,
             drive_hash_index,
@@ -2896,6 +3349,7 @@ def run_sync_mode():
 │ 🔄 Conteúdo atualizado: {stats['updated_content']:<23} │
 │ ✏️  Renomes WebDAV: {stats['renamed_webdav']:<27} │
 │ 📝 Renomes storage: {stats['renamed_local']:<27} │
+│ Nomes canônicos Zotero: {stats['canonical_attachment_names']:<23} │
 │ 🧹 Duplicados removidos: {stats['pruned_drive_duplicates']:<22} │
 │ ⬇️  Baixados do Zotero: {stats['downloaded_zotero']:<24} │
 │ 📤 Materializados no drive: {stats['materialized_drive']:<20} │

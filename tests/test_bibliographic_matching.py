@@ -21,7 +21,15 @@ os.environ["ZOTERO_ENV_FILE"] = str(_ENV_FILE)
 zsync = importlib.import_module("zotero_sync_webdav")
 
 
-def make_item(key, title, *, doi="", date_added="2025-01-01T00:00:00Z"):
+def make_item(
+    key,
+    title,
+    *,
+    doi="",
+    date="",
+    creators=None,
+    date_added="2025-01-01T00:00:00Z",
+):
     return {
         "key": key,
         "data": {
@@ -29,6 +37,8 @@ def make_item(key, title, *, doi="", date_added="2025-01-01T00:00:00Z"):
             "itemType": "journalArticle",
             "title": title,
             "DOI": doi,
+            "date": date,
+            "creators": list(creators or []),
             "dateAdded": date_added,
         },
     }
@@ -125,6 +135,68 @@ class BibliographicMatchingTests(unittest.TestCase):
         )
 
         self.assertEqual(preferred, "Arquivo X.pdf")
+
+    def test_canonical_parent_pdf_filename_uses_title_author_year(self):
+        item = make_item(
+            "PARENT1",
+            "A situação atual dos cursos de licenciatura no Brasil frente à hegemonia da educação mercantil e empresarial",
+            date="2015-12",
+            creators=[{"creatorType": "author", "lastName": "Diniz-Pereira"}],
+        )
+
+        filename = zsync.canonical_parent_pdf_filename(item)
+
+        self.assertEqual(
+            filename,
+            "A situação atual dos cursos de licenciatura no Brasil frente à hegemonia da educação mercantil e empresarial - Diniz-Pereira 2015.pdf",
+        )
+
+    def test_canonical_parent_pdf_filename_removes_copy_markers(self):
+        item = make_item(
+            "PARENT1",
+            "Cópia de Arquivo X (1)",
+            date="2024",
+            creators=[{"creatorType": "author", "name": "Maria Silva"}],
+        )
+
+        filename = zsync.canonical_parent_pdf_filename(item)
+
+        self.assertEqual(filename, "Arquivo X - Silva 2024.pdf")
+
+    def test_hash_match_selection_prefers_metadata_name_matching_drive(self):
+        parent_a = make_item(
+            "PARENTA",
+            "O conceito de biopoder no pensamento de michel foucault",
+            date="2017",
+            creators=[{"creatorType": "author", "lastName": "Nogueira Furtado"}],
+        )
+        parent_b = make_item(
+            "PARENTB",
+            "O conceito de biopoder no pensamento de Michel Foucault",
+            date="2016",
+            creators=[{"creatorType": "author", "lastName": "Furtado"}],
+        )
+        attachments = {
+            "ATTA": {"key": "ATTA", "data": {"key": "ATTA", "parentItem": "PARENTA"}},
+            "ATTB": {"key": "ATTB", "data": {"key": "ATTB", "parentItem": "PARENTB"}},
+        }
+        parents = {
+            "PARENTA": parent_a,
+            "PARENTB": parent_b,
+        }
+        drive_name = "O conceito de biopoder no pensamento de Michel Foucault - Furtado 2016.pdf"
+
+        entry = zsync.choose_hash_match_entry(
+            [
+                {"key": "ATTA", "filename": "O conceito de biopoder no pensamento de michel foucault - Nogueira Furtado 2017.pdf", "info": {}},
+                {"key": "ATTB", "filename": drive_name, "info": {}},
+            ],
+            drive_name,
+            attachments,
+            parents,
+        )
+
+        self.assertEqual(entry["key"], "ATTB")
 
     def test_enforce_drive_canonical_name_deletes_same_hash_copy(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -315,7 +387,7 @@ class BibliographicMatchingTests(unittest.TestCase):
         }
 
         self.assertTrue(zsync.merge_duplicate_metadata_into_keeper(zot, keeper, duplicate))
-        self.assertEqual(zot.updated, [keeper_item])
+        self.assertEqual(zot.updated, [keeper_item["data"]])
         self.assertEqual(keeper_item["data"]["relations"]["dc:relation"], ["existing", "new"])
         self.assertEqual(keeper_item["data"]["relations"]["dc:replaces"], "old")
 
