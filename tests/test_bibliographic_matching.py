@@ -44,6 +44,32 @@ def make_item(
     }
 
 
+
+def make_attachment(
+    key,
+    filename,
+    *,
+    parent_key="",
+    link_mode="imported_file",
+    content_type="application/pdf",
+    title=None,
+    path=None,
+):
+    data = {
+        "key": key,
+        "itemType": "attachment",
+        "title": title if title is not None else filename,
+        "linkMode": link_mode,
+        "contentType": content_type,
+    }
+    if filename is not None:
+        data["filename"] = filename
+    if parent_key:
+        data["parentItem"] = parent_key
+    if path is not None:
+        data["path"] = path
+    return {"key": key, "data": data}
+
 class BibliographicMatchingTests(unittest.TestCase):
     def test_truncated_zotero_filename_selects_existing_parent(self):
         index = zsync.build_bibliographic_parent_index([
@@ -162,6 +188,28 @@ class BibliographicMatchingTests(unittest.TestCase):
         filename = zsync.canonical_parent_pdf_filename(item)
 
         self.assertEqual(filename, "Arquivo X - Silva 2024.pdf")
+
+    def test_canonical_standalone_attachment_filename_strips_copy_markers(self):
+        attachment = make_attachment(
+            "ATT1",
+            "Cópia de Campo da especularidade Clínica pulsional do bebê - Marie Couvert 2020 (1).pdf",
+        )
+
+        filename = zsync.canonical_standalone_attachment_filename(attachment)
+
+        self.assertEqual(
+            filename,
+            "Campo da especularidade Clínica pulsional do bebê - Marie Couvert 2020.pdf",
+        )
+
+    def test_canonical_standalone_attachment_filename_ignores_child_attachments(self):
+        attachment = make_attachment(
+            "ATT1",
+            "Cópia de Arquivo X.pdf",
+            parent_key="PARENT1",
+        )
+
+        self.assertIsNone(zsync.canonical_standalone_attachment_filename(attachment))
 
     def test_hash_match_selection_prefers_metadata_name_matching_drive(self):
         parent_a = make_item(

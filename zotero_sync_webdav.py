@@ -47,9 +47,11 @@ Limites atuais importantes:
 
 import argparse
 import atexit
+import configparser
 import hashlib
 import heapq
 from difflib import SequenceMatcher
+import io
 import json
 import logging
 import os
@@ -57,10 +59,14 @@ import re
 import shlex
 import shutil
 import signal
+import tempfile
 import subprocess
 import sys
 import time
 import unicodedata
+import urllib.error
+import urllib.request
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -194,6 +200,21 @@ def get_env_int(name: str, default: int) -> int:
         return default
     return max(0, value)
 
+def get_env_bool(name: str, default: bool) -> bool:
+    """Lê booleano de ambiente com fallback seguro."""
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on", "sim"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "nao", "não"}:
+        return False
+    logging.warning("Valor inválido para %s=%r. Usando %s.", name, raw_value, default)
+    return default
+
+
+
 
 HASH_READ_TIMEOUT_SECONDS = get_env_int(
     "ZOTERO_HASH_TIMEOUT_SECONDS",
@@ -206,6 +227,33 @@ CONTENT_PROBE_TIMEOUT_SECONDS = get_env_int(
 PYZOTERO_UPLOAD_TIMEOUT_SECONDS = get_env_int(
     "ZOTERO_UPLOAD_TIMEOUT_SECONDS",
     PYZOTERO_UPLOAD_TIMEOUT_SECONDS_DEFAULT,
+)
+
+ZOTERO_PROFILE_ROOT = Path.home() / ".zotero" / "zotero"
+ZOTERO_DESKTOP_BINARY = os.environ.get("ZOTERO_DESKTOP_BINARY") or shutil.which("zotero") or ""
+ZOTERO_DESKTOP_CONNECTOR_URL = os.environ.get(
+    "ZOTERO_DESKTOP_CONNECTOR_URL",
+    "http://127.0.0.1:23119",
+).rstrip("/")
+ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_ID = "zotero-sync-recognizer@example.com"
+ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_DIR = SCRIPT_DIR / "zotero_desktop_recognizer"
+ZOTERO_DESKTOP_RECOGNIZER_PING_URL = (
+    f"{ZOTERO_DESKTOP_CONNECTOR_URL}/zoteroSyncRecognize/ping"
+)
+ZOTERO_DESKTOP_RECOGNIZER_RECOGNIZE_URL = (
+    f"{ZOTERO_DESKTOP_CONNECTOR_URL}/zoteroSyncRecognize/recognize"
+)
+ZOTERO_DESKTOP_RECOGNITION_ENABLED = get_env_bool(
+    "ZOTERO_DESKTOP_RECOGNITION_ENABLED",
+    True,
+)
+ZOTERO_DESKTOP_START_TIMEOUT_SECONDS = get_env_int(
+    "ZOTERO_DESKTOP_START_TIMEOUT_SECONDS",
+    45,
+)
+ZOTERO_DESKTOP_RECOGNIZE_TIMEOUT_SECONDS = get_env_int(
+    "ZOTERO_DESKTOP_RECOGNIZE_TIMEOUT_SECONDS",
+    900,
 )
 
 
@@ -526,6 +574,30 @@ def get_filename_from_item(item: dict) -> str:
     return ""
 
 
+def get_attachment_file_path(item: dict) -> str | None:
+    """Resolve o caminho local de um anexo a partir do campo path."""
+    data = item.get('data', {})
+    path = data.get('path')
+    if not path:
+        return None
+    path_str = str(path).strip()
+    if not path_str:
+        return None
+    if path_str.startswith("storage:"):
+        filename = path_str.split(":", 1)[-1]
+        key = item.get('key') or data.get('key')
+        if not key or not filename:
+            return None
+        return os.path.join(LOCAL_COPY_DIR, key, filename)
+    if path_str.startswith("file:///"):
+        path_str = path_str[8:]
+    elif path_str.startswith("file://"):
+        path_str = path_str[7:]
+    elif path_str.startswith("file:"):
+        path_str = path_str[5:]
+    return os.path.abspath(unquote(path_str))
+
+
 def parse_zotero_date(date_str: str) -> datetime | None:
     """Converte a string de data do Zotero em datetime."""
     if not date_str:
@@ -705,6 +777,20 @@ def canonical_parent_pdf_filename(parent_item: dict | None) -> str | None:
     if not stem:
         return None
     return f"{stem}.pdf"
+
+
+def canonical_standalone_attachment_filename(item: dict) -> str | None:
+    """Remove marcadores de cópia de anexos PDF standalone sem inventar metadados."""
+    data = item.get('data', {})
+    if data.get('parentItem') or not attachment_is_pdf(item):
+        return None
+    current_name = os.path.basename(get_filename_from_item(item) or data.get('title') or '')
+    if not current_name:
+        return None
+    if not current_name.lower().endswith('.pdf'):
+        current_name = f"{current_name}.pdf"
+    desired = canonical_duplicate_filename(current_name)
+    return desired if desired and desired != current_name else None
 
 
 
@@ -2108,6 +2194,7 @@ def update_zotero_attachment_filename(
     key: str,
     new_filename: str,
     item: dict | None = None,
+    linked_path: str | None = None,
 ) -> bool:
     """Atualiza title/filename do anexo no Zotero."""
     if not key or not new_filename:
@@ -2118,15 +2205,25 @@ def update_zotero_attachment_filename(
         current_name = os.path.basename(get_filename_from_item({'data': item_data}))
         current_title = item_data.get('title')
         if item_data.get('linkMode') == 'linked_file':
-            if current_name == new_filename and current_title == new_filename:
+            resolved_linked_path = linked_path
+            if not resolved_linked_path:
+                current_path = get_attachment_file_path({'data': item_data, 'key': key})
+                if current_path:
+                    resolved_linked_path = os.path.join(os.path.dirname(current_path), new_filename)
+                else:
+                    resolved_linked_path = os.path.join(TARGET_FOLDER, new_filename)
+            if (
+                current_name == new_filename
+                and current_title == new_filename
+                and os.path.abspath(item_data.get('path') or "") == os.path.abspath(resolved_linked_path)
+            ):
                 return False
-        elif current_name == new_filename or current_title == new_filename:
-            return False
-        if item_data.get('linkMode') == 'linked_file':
             item_data.pop('filename', None)
             item_data['title'] = new_filename
-            item_data['path'] = os.path.join(TARGET_FOLDER, new_filename)
+            item_data['path'] = os.path.abspath(resolved_linked_path)
         else:
+            if current_name == new_filename and current_title == new_filename:
+                return False
             item_data['filename'] = new_filename
             item_data['title'] = new_filename
             if item_data.get('path', '').startswith('storage:'):
@@ -2199,10 +2296,357 @@ def rename_local_attachment(
         return current_path
 
     rename_cache_entry(HASH_CACHE, current_path, dest_path)
-
-    update_zotero_attachment_filename(zot, key, new_filename, item)
-
+    if not update_zotero_attachment_filename(zot, key, new_filename, item):
+        os.rename(dest_path, current_path)
+        rename_cache_entry(HASH_CACHE, dest_path, current_path)
+        logging.warning(
+            "[RENOMEIO] Revertido rename local do anexo %s porque o Zotero não confirmou '%s'.",
+            key,
+            new_filename,
+        )
+        return current_path
     return dest_path
+
+
+def rename_linked_attachment_file(
+    zot: zotero.Zotero,
+    key: str,
+    current_path: str,
+    new_filename: str,
+) -> str:
+    """Renomeia o arquivo real de um linked_file e atualiza o Zotero."""
+    if not key or not current_path or not os.path.exists(current_path) or not new_filename:
+        return current_path
+
+    current_name = os.path.basename(current_path)
+    try:
+        item = zot.item(key)
+    except Exception as exc:
+        logging.warning("[RENOMEIO] Falha ao obter linked_file %s: %s", key, exc)
+        return current_path
+
+    if current_name == new_filename:
+        update_zotero_attachment_filename(zot, key, new_filename, item, linked_path=current_path)
+        return current_path
+
+    dest_path = os.path.join(os.path.dirname(current_path), new_filename)
+    if os.path.exists(dest_path):
+        logging.warning(
+            "[RENOMEIO] Já existe '%s' ao renomear linked_file %s. Mantido nome '%s'.",
+            dest_path,
+            key,
+            current_name,
+        )
+        return current_path
+
+    try:
+        os.rename(current_path, dest_path)
+    except OSError as exc:
+        logging.warning(
+            "[RENOMEIO] Não foi possível renomear linked_file '%s' para '%s': %s",
+            current_name,
+            new_filename,
+            exc,
+        )
+        return current_path
+
+    rename_cache_entry(HASH_CACHE, current_path, dest_path)
+    if not update_zotero_attachment_filename(zot, key, new_filename, item, linked_path=dest_path):
+        os.rename(dest_path, current_path)
+        rename_cache_entry(HASH_CACHE, dest_path, current_path)
+        logging.warning(
+            "[RENOMEIO] Revertido rename do linked_file %s porque o Zotero não confirmou '%s'.",
+            key,
+            new_filename,
+        )
+        return current_path
+    return dest_path
+
+
+def resolve_zotero_profile_dir() -> Path | None:
+    """Resolve o profile ativo do Zotero Desktop."""
+    profiles_ini = ZOTERO_PROFILE_ROOT / "profiles.ini"
+    if not profiles_ini.is_file():
+        return None
+
+    parser = configparser.RawConfigParser()
+    try:
+        parser.read(profiles_ini, encoding="utf-8")
+    except OSError:
+        return None
+
+    fallback = None
+    for section in parser.sections():
+        if not section.startswith("Profile"):
+            continue
+        raw_path = parser.get(section, "Path", fallback="").strip()
+        if not raw_path:
+            continue
+        profile_path = Path(raw_path)
+        if parser.get(section, "IsRelative", fallback="1") != "0":
+            profile_path = ZOTERO_PROFILE_ROOT / profile_path
+        if fallback is None:
+            fallback = profile_path
+        if parser.get(section, "Default", fallback="0") == "1":
+            return profile_path
+    return fallback
+
+
+
+def build_desktop_recognizer_xpi() -> bytes:
+    """Empacota o plugin local que expõe o reconhecimento do Zotero Desktop."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for relative in ("manifest.json", "bootstrap.js", "install.rdf"):
+            source = ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_DIR / relative
+            archive.writestr(relative, source.read_text(encoding="utf-8"))
+    return buffer.getvalue()
+
+
+def install_desktop_recognizer_plugin(stats: dict) -> tuple[bool, bool]:
+    """Garante que o plugin local de reconhecimento esteja instalado no profile do Zotero."""
+    profile_dir = resolve_zotero_profile_dir()
+    if not profile_dir:
+        logging.warning("[DESKTOP] Profile do Zotero não encontrado. Reconhecimento automático indisponível.")
+        return False, False
+
+    if not ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_DIR.is_dir():
+        logging.warning(
+            "[DESKTOP] Fonte do plugin de reconhecimento não encontrada em '%s'.",
+            ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_DIR,
+        )
+        return False, False
+
+    extensions_dir = profile_dir / "extensions"
+    extensions_dir.mkdir(parents=True, exist_ok=True)
+    plugin_path = extensions_dir / f"{ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_ID}.xpi"
+    payload = build_desktop_recognizer_xpi()
+    changed = True
+    if plugin_path.is_file():
+        try:
+            changed = plugin_path.read_bytes() != payload
+        except OSError:
+            changed = True
+
+    if changed:
+        with tempfile.NamedTemporaryFile(delete=False, dir=extensions_dir, suffix=".xpi") as handle:
+            handle.write(payload)
+            temp_path = Path(handle.name)
+        os.replace(temp_path, plugin_path)
+        stats['desktop_plugin_updates'] = stats.get('desktop_plugin_updates', 0) + 1
+        logging.info("[DESKTOP] Plugin local de reconhecimento instalado/atualizado em '%s'.", plugin_path)
+
+    proxy_path = extensions_dir / ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_ID
+    if proxy_path.exists():
+        try:
+            proxy_path.unlink()
+            changed = True
+        except OSError as exc:
+            logging.warning("[DESKTOP] Não foi possível remover proxy legado '%s': %s", proxy_path, exc)
+
+    prefs_path = profile_dir / "prefs.js"
+    if prefs_path.is_file():
+        try:
+            lines = prefs_path.read_text(encoding="utf-8").splitlines()
+            filtered = [
+                line for line in lines
+                if 'extensions.lastAppBuildId' not in line
+                and 'extensions.lastAppVersion' not in line
+            ]
+            if filtered != lines:
+                prefs_path.write_text("\n".join(filtered) + "\n", encoding="utf-8")
+                changed = True
+        except OSError as exc:
+            logging.warning("[DESKTOP] Não foi possível atualizar prefs.js do Zotero: %s", exc)
+
+    return True, changed
+
+
+def request_local_json(
+    url: str,
+    payload: dict | None = None,
+    timeout_seconds: int = 5,
+) -> tuple[int | None, dict | str]:
+    """Executa requisição JSON contra o Zotero Desktop local."""
+    body = None
+    headers = {}
+    method = "GET"
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        method = "POST"
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                parsed = raw
+            return response.status, parsed
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = raw
+        return exc.code, parsed
+    except OSError as exc:
+        return None, {"error": str(exc)}
+
+
+def ensure_zotero_desktop_connector_running() -> bool:
+    """Garante que o Zotero Desktop esteja com o conector HTTP disponível."""
+    status, _ = request_local_json(
+        f"{ZOTERO_DESKTOP_CONNECTOR_URL}/connector/ping",
+        timeout_seconds=3,
+    )
+    if status == 200:
+        return True
+    if not ZOTERO_DESKTOP_BINARY:
+        return False
+    try:
+        subprocess.Popen(
+            [ZOTERO_DESKTOP_BINARY],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        logging.warning("[DESKTOP] Falha ao iniciar Zotero Desktop: %s", exc)
+        return False
+    deadline = time.monotonic() + ZOTERO_DESKTOP_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(1)
+        status, _ = request_local_json(
+            f"{ZOTERO_DESKTOP_CONNECTOR_URL}/connector/ping",
+            timeout_seconds=3,
+        )
+        if status == 200:
+            return True
+    return False
+
+
+def ensure_desktop_recognizer_available(stats: dict) -> bool:
+    """Instala o plugin e garante que o endpoint local de reconhecimento esteja ativo."""
+    if not ZOTERO_DESKTOP_RECOGNITION_ENABLED:
+        logging.info("[DESKTOP] Reconhecimento via Zotero Desktop desabilitado por configuração.")
+        return False
+
+    installed, changed = install_desktop_recognizer_plugin(stats)
+    if not installed:
+        return False
+    if not ensure_zotero_desktop_connector_running():
+        logging.warning("[DESKTOP] Zotero Desktop indisponível. Reconhecimento de PDFs standalone será ignorado.")
+        return False
+
+    deadline = time.monotonic() + (5 if changed else 1)
+    while time.monotonic() < deadline:
+        status, _ = request_local_json(ZOTERO_DESKTOP_RECOGNIZER_PING_URL, timeout_seconds=3)
+        if status == 200:
+            return True
+        time.sleep(1)
+
+    logging.warning(
+        "[DESKTOP] Endpoint local de reconhecimento não está ativo. "
+        "Se o plugin foi atualizado com o Zotero já aberto, reinicie o Zotero Desktop.",
+    )
+    return False
+
+
+def normalize_standalone_attachment_names(
+    zot: zotero.Zotero,
+    attachments: List[dict],
+    stats: dict,
+) -> bool:
+    """Remove marcadores de cópia de anexos PDF standalone."""
+    stats.setdefault('normalized_standalone_attachments', 0)
+    changed = False
+
+    for item in attachments:
+        data = item.get('data', {})
+        key = item.get('key') or data.get('key')
+        if not key or data.get('parentItem') or not attachment_is_pdf(item):
+            continue
+
+        desired_name = canonical_standalone_attachment_filename(item)
+        if not desired_name:
+            continue
+
+        current_name = os.path.basename(get_filename_from_item(item) or data.get('title') or '')
+        changed_this_item = False
+        if data.get('linkMode') == 'linked_file':
+            linked_path = get_attachment_file_path(item)
+            if linked_path and os.path.exists(linked_path):
+                updated_path = rename_linked_attachment_file(zot, key, linked_path, desired_name)
+                changed_this_item = updated_path != linked_path
+            else:
+                changed_this_item = update_zotero_attachment_filename(zot, key, desired_name, item)
+        else:
+            local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, key))
+            if local_path and os.path.exists(local_path):
+                updated_path = rename_local_attachment(zot, key, local_path, desired_name)
+                changed_this_item = updated_path != local_path
+            else:
+                changed_this_item = update_zotero_attachment_filename(zot, key, desired_name, item)
+
+        if changed_this_item:
+            stats['normalized_standalone_attachments'] += 1
+            changed = True
+            logging.info(
+                "[NOME-STANDALONE] Anexo standalone %s normalizado: '%s' -> '%s'.",
+                key,
+                current_name,
+                desired_name,
+            )
+    return changed
+
+
+def recognize_standalone_pdf_attachments(
+    attachments: List[dict],
+    stats: dict,
+) -> bool:
+    """Aciona o Zotero Desktop para reconhecer PDFs standalone."""
+    stats.setdefault('desktop_recognition_requested', 0)
+    stats.setdefault('desktop_recognition_processed', 0)
+    stats.setdefault('desktop_recognition_skipped', 0)
+
+    candidates: list[str] = []
+    for item in attachments:
+        data = item.get('data', {})
+        key = item.get('key') or data.get('key')
+        if not key or data.get('parentItem') or not attachment_is_pdf(item):
+            continue
+        candidates.append(key)
+
+    if not candidates:
+        return False
+
+    stats['desktop_recognition_requested'] += len(candidates)
+    if not ensure_desktop_recognizer_available(stats):
+        stats['desktop_recognition_skipped'] += len(candidates)
+        return False
+
+    status, payload = request_local_json(
+        ZOTERO_DESKTOP_RECOGNIZER_RECOGNIZE_URL,
+        payload={"itemKeys": candidates},
+        timeout_seconds=ZOTERO_DESKTOP_RECOGNIZE_TIMEOUT_SECONDS,
+    )
+    if status != 200 or not isinstance(payload, dict):
+        stats['desktop_recognition_skipped'] += len(candidates)
+        logging.warning("[DESKTOP] Falha ao acionar reconhecimento local: %s", payload)
+        return False
+
+    processed = int(payload.get("processed", 0) or 0)
+    skipped = int(payload.get("skipped", 0) or 0)
+    stats['desktop_recognition_processed'] += processed
+    stats['desktop_recognition_skipped'] += skipped
+    logging.info(
+        "[DESKTOP] Reconhecimento de PDFs standalone concluído. solicitados=%d processados=%d ignorados=%d.",
+        len(candidates),
+        processed,
+        skipped,
+    )
+    return processed > 0
 
 
 def build_item_by_key(items: List[dict]) -> dict[str, dict]:
@@ -2285,18 +2729,27 @@ def enforce_attachment_metadata_filenames(
             continue
 
         changed_this_item = False
-        local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, key))
-        if local_path and os.path.exists(local_path):
-            local_name = os.path.basename(local_path)
-            if local_name != desired_name:
-                updated_path = rename_local_attachment(zot, key, local_path, desired_name)
-                if updated_path != local_path:
-                    stats['renamed_local'] += 1
+        if data.get('linkMode') == 'linked_file':
+            linked_path = get_attachment_file_path(item)
+            if linked_path and os.path.exists(linked_path):
+                updated_path = rename_linked_attachment_file(zot, key, linked_path, desired_name)
+                if updated_path != linked_path:
                     changed_this_item = True
             else:
-                changed_this_item = update_zotero_attachment_filename(zot, key, desired_name)
+                changed_this_item = update_zotero_attachment_filename(zot, key, desired_name, item)
         else:
-            changed_this_item = update_zotero_attachment_filename(zot, key, desired_name, item)
+            local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, key))
+            if local_path and os.path.exists(local_path):
+                local_name = os.path.basename(local_path)
+                if local_name != desired_name:
+                    updated_path = rename_local_attachment(zot, key, local_path, desired_name)
+                    if updated_path != local_path:
+                        stats['renamed_local'] += 1
+                        changed_this_item = True
+                else:
+                    changed_this_item = update_zotero_attachment_filename(zot, key, desired_name)
+            else:
+                changed_this_item = update_zotero_attachment_filename(zot, key, desired_name, item)
 
         if changed_this_item:
             data['filename'] = desired_name
@@ -2736,6 +3189,11 @@ def run_sync_mode():
         'auto_duplicate_cleanup_skipped': 0,
         'merged_duplicate_metadata': 0,
         'canonical_attachment_names': 0,
+        'normalized_standalone_attachments': 0,
+        'desktop_plugin_updates': 0,
+        'desktop_recognition_requested': 0,
+        'desktop_recognition_processed': 0,
+        'desktop_recognition_skipped': 0,
     }
     tie_conflicts: list[dict[str, str]] = []
 
@@ -2770,6 +3228,33 @@ def run_sync_mode():
         logging.error(f"Erro ao coletar anexos do Zotero: {e}")
         finalize_execution(stats)
         return
+
+    standalone_names_changed = normalize_standalone_attachment_names(
+        zot,
+        all_attachments,
+        stats,
+    )
+    if standalone_names_changed:
+        logging.info("[NOME-STANDALONE] Recarregando anexos após normalização de PDFs standalone.")
+        (
+            all_attachments,
+            existing_filenames,
+            existing_filenames_aggressive,
+        ) = collect_all_attachments(zot, stats)
+        stats['zotero_unique_filenames'] = len(existing_filenames)
+
+    desktop_recognition_changed = recognize_standalone_pdf_attachments(
+        all_attachments,
+        stats,
+    )
+    if desktop_recognition_changed:
+        logging.info("[DESKTOP] Recarregando anexos após reconhecimento local de PDFs standalone.")
+        (
+            all_attachments,
+            existing_filenames,
+            existing_filenames_aggressive,
+        ) = collect_all_attachments(zot, stats)
+        stats['zotero_unique_filenames'] = len(existing_filenames)
 
     print("\nColetando itens bibliográficos para evitar anexos soltos duplicadores...")
     try:
@@ -3350,6 +3835,8 @@ def run_sync_mode():
 │ ✏️  Renomes WebDAV: {stats['renamed_webdav']:<27} │
 │ 📝 Renomes storage: {stats['renamed_local']:<27} │
 │ Nomes canônicos Zotero: {stats['canonical_attachment_names']:<23} │
+│ Standalone normalizados: {stats['normalized_standalone_attachments']:<22} │
+│ Reconhecimento desktop: {stats['desktop_recognition_processed']}/{stats['desktop_recognition_requested']:<23} │
 │ 🧹 Duplicados removidos: {stats['pruned_drive_duplicates']:<22} │
 │ ⬇️  Baixados do Zotero: {stats['downloaded_zotero']:<24} │
 │ 📤 Materializados no drive: {stats['materialized_drive']:<20} │
