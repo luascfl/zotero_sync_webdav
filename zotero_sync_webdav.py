@@ -2397,7 +2397,7 @@ def build_desktop_recognizer_xpi() -> bytes:
     """Empacota o plugin local que expõe o reconhecimento do Zotero Desktop."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for relative in ("manifest.json", "bootstrap.js", "install.rdf"):
+        for relative in ("manifest.json", "bootstrap.js"):
             source = ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_DIR / relative
             archive.writestr(relative, source.read_text(encoding="utf-8"))
     return buffer.getvalue()
