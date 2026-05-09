@@ -7,6 +7,7 @@
   "applications": {
     "zotero": {
       "id": "zotero-sync-recognizer@example.com",
+      "update_url": "https://example.com/zotero-sync-recognizer/updates.json",
       "strict_min_version": "6.999",
       "strict_max_version": "9.*"
     }
