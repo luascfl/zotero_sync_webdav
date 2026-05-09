@@ -2609,6 +2609,7 @@ def recognize_standalone_pdf_attachments(
     stats.setdefault('desktop_recognition_requested', 0)
     stats.setdefault('desktop_recognition_processed', 0)
     stats.setdefault('desktop_recognition_skipped', 0)
+    stats.setdefault('desktop_parent_fallbacks', 0)
 
     candidates: list[str] = []
     for item in attachments:
@@ -2638,15 +2639,18 @@ def recognize_standalone_pdf_attachments(
 
     processed = int(payload.get("processed", 0) or 0)
     skipped = int(payload.get("skipped", 0) or 0)
+    fallback_parents = int(payload.get("fallbackParents", 0) or 0)
     stats['desktop_recognition_processed'] += processed
     stats['desktop_recognition_skipped'] += skipped
+    stats['desktop_parent_fallbacks'] += fallback_parents
     logging.info(
-        "[DESKTOP] Reconhecimento de PDFs standalone concluído. solicitados=%d processados=%d ignorados=%d.",
+        "[DESKTOP] Reconhecimento de PDFs standalone concluído. solicitados=%d processados=%d ignorados=%d pais_fallback=%d.",
         len(candidates),
         processed,
         skipped,
+        fallback_parents,
     )
-    return processed > 0
+    return processed > 0 or fallback_parents > 0
 
 
 def build_item_by_key(items: List[dict]) -> dict[str, dict]:
@@ -3194,6 +3198,7 @@ def run_sync_mode():
         'desktop_recognition_requested': 0,
         'desktop_recognition_processed': 0,
         'desktop_recognition_skipped': 0,
+        'desktop_parent_fallbacks': 0,
     }
     tie_conflicts: list[dict[str, str]] = []
 
@@ -3837,6 +3842,7 @@ def run_sync_mode():
 │ Nomes canônicos Zotero: {stats['canonical_attachment_names']:<23} │
 │ Standalone normalizados: {stats['normalized_standalone_attachments']:<22} │
 │ Reconhecimento desktop: {stats['desktop_recognition_processed']}/{stats['desktop_recognition_requested']:<23} │
+│ Itens pai fallback: {stats['desktop_parent_fallbacks']:<24} │
 │ 🧹 Duplicados removidos: {stats['pruned_drive_duplicates']:<22} │
 │ ⬇️  Baixados do Zotero: {stats['downloaded_zotero']:<24} │
 │ 📤 Materializados no drive: {stats['materialized_drive']:<20} │
