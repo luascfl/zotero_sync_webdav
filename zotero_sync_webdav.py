@@ -921,6 +921,16 @@ def choose_bibliographic_duplicate_keeper(
 
     return max(entries, key=score)
 
+def duplicate_summary_has_child_content(summary: dict) -> bool:
+    """Indica se o item duplicado tem algum child que precisa ser preservado."""
+    return bool(
+        summary.get('pdf_hashes')
+        or summary.get('pdf_filenames')
+        or summary.get('unsafe_child_details')
+        or summary.get('unsafe_children')
+        or summary.get('missing_hash_attachments')
+    )
+
 
 def duplicate_item_can_be_deleted(
     duplicate_entry: dict,
@@ -929,6 +939,17 @@ def duplicate_item_can_be_deleted(
     keeper_summary: dict,
 ) -> tuple[bool, str]:
     """Decide se uma duplicata bibliográfica pode ser apagada sem perder conteúdo."""
+    duplicate_has_child_content = duplicate_summary_has_child_content(duplicate_summary)
+    keeper_has_child_content = duplicate_summary_has_child_content(keeper_summary)
+    if not duplicate_has_child_content and (
+        keeper_has_child_content
+        or (
+            duplicate_entry.get('doi')
+            and duplicate_entry.get('doi') == keeper_entry.get('doi')
+        )
+    ):
+        return True, "item duplicado sem anexos"
+
     if duplicate_entry.get('relations'):
         return False, "item duplicado tem relações Zotero"
     unsafe_reason = describe_unsafe_duplicate_children(duplicate_summary)
@@ -950,7 +971,7 @@ def merge_duplicate_metadata_into_keeper(
     keeper_entry: dict,
     duplicate_entry: dict,
 ) -> bool:
-    """Preserva coleções e tags da duplicata antes de apagá-la."""
+    """Preserva coleções, tags e relações da duplicata antes de apagá-la."""
     keeper_item = keeper_entry.get('item')
     if not keeper_item:
         return True
@@ -973,6 +994,27 @@ def merge_duplicate_metadata_into_keeper(
             changed = True
     if changed:
         data['tags'] = list(by_tag.values())
+
+    current_relations = dict(data.get('relations') or {})
+    merged_relations = {key: value for key, value in current_relations.items()}
+    for predicate, duplicate_value in (duplicate_entry.get('relations') or {}).items():
+        if not predicate or not duplicate_value:
+            continue
+        current_value = merged_relations.get(predicate)
+        if not current_value:
+            merged_relations[predicate] = duplicate_value
+            changed = True
+            continue
+        current_values = current_value if isinstance(current_value, list) else [current_value]
+        duplicate_values = duplicate_value if isinstance(duplicate_value, list) else [duplicate_value]
+        combined = list(current_values)
+        for value in duplicate_values:
+            if value not in combined:
+                combined.append(value)
+                changed = True
+        merged_relations[predicate] = combined if len(combined) > 1 else combined[0]
+    if changed:
+        data['relations'] = merged_relations
         zot.update_item(keeper_item)
     return True
 

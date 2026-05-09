@@ -222,7 +222,7 @@ class BibliographicMatchingTests(unittest.TestCase):
         self.assertFalse(can_delete)
         self.assertIn("não redundante", reason)
 
-    def test_duplicate_cleanup_blocks_title_only_metadata_without_pdf(self):
+    def test_duplicate_cleanup_blocks_title_only_metadata_when_all_items_are_empty(self):
         duplicate = {"key": "DUP", "doi": "", "relations": {}}
         keeper = {"key": "KEEP", "doi": "", "relations": {}}
 
@@ -235,6 +235,89 @@ class BibliographicMatchingTests(unittest.TestCase):
 
         self.assertFalse(can_delete)
         self.assertIn("sem DOI", reason)
+
+    def test_duplicate_cleanup_allows_empty_duplicate_when_keeper_has_attachment(self):
+        duplicate = {"key": "DUP", "doi": "", "relations": {}}
+        keeper = {"key": "KEEP", "doi": "", "relations": {}}
+
+        can_delete, reason = zsync.duplicate_item_can_be_deleted(
+            duplicate,
+            keeper,
+            {
+                "pdf_hashes": set(),
+                "pdf_filenames": [],
+                "unsafe_children": [],
+                "missing_hash_attachments": [],
+            },
+            {
+                "pdf_hashes": {"same"},
+                "pdf_filenames": ["Arquivo.pdf"],
+                "unsafe_children": [],
+                "missing_hash_attachments": [],
+            },
+        )
+
+        self.assertTrue(can_delete, reason)
+        self.assertIn("sem anexos", reason)
+
+    def test_duplicate_cleanup_allows_empty_duplicate_with_relations(self):
+        duplicate = {
+            "key": "DUP",
+            "doi": "",
+            "relations": {"dc:replaces": "http://zotero.org/users/1/items/OLD"},
+        }
+        keeper = {"key": "KEEP", "doi": "", "relations": {}}
+
+        can_delete, reason = zsync.duplicate_item_can_be_deleted(
+            duplicate,
+            keeper,
+            {
+                "pdf_hashes": set(),
+                "pdf_filenames": [],
+                "unsafe_children": [],
+                "missing_hash_attachments": [],
+            },
+            {
+                "pdf_hashes": {"same"},
+                "pdf_filenames": ["Arquivo.pdf"],
+                "unsafe_children": [],
+                "missing_hash_attachments": [],
+            },
+        )
+
+        self.assertTrue(can_delete, reason)
+        self.assertIn("sem anexos", reason)
+
+    def test_duplicate_cleanup_merges_relations_before_deletion(self):
+        class FakeZotero:
+            def __init__(self):
+                self.updated = []
+
+            def update_item(self, item):
+                self.updated.append(item)
+
+        zot = FakeZotero()
+        keeper_item = {
+            "data": {
+                "collections": [],
+                "tags": [],
+                "relations": {"dc:relation": "existing"},
+            }
+        }
+        keeper = {"item": keeper_item}
+        duplicate = {
+            "collections": [],
+            "tags": [],
+            "relations": {
+                "dc:relation": "new",
+                "dc:replaces": "old",
+            },
+        }
+
+        self.assertTrue(zsync.merge_duplicate_metadata_into_keeper(zot, keeper, duplicate))
+        self.assertEqual(zot.updated, [keeper_item])
+        self.assertEqual(keeper_item["data"]["relations"]["dc:relation"], ["existing", "new"])
+        self.assertEqual(keeper_item["data"]["relations"]["dc:replaces"], "old")
 
     def test_unsafe_duplicate_child_classifies_highlight_annotation(self):
         detail = zsync.classify_unsafe_duplicate_child({
