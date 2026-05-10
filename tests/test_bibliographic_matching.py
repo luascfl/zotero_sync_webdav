@@ -212,6 +212,33 @@ class BibliographicMatchingTests(unittest.TestCase):
 
         self.assertIsNone(zsync.canonical_standalone_attachment_filename(attachment))
 
+    def test_parse_path_map_entries_parses_pairs(self):
+        pairs = zsync.parse_path_map_entries([
+            "/mnt/old=/mnt/new",
+            "/vault a=/vault b",
+        ])
+
+        self.assertEqual(
+            pairs,
+            [("/mnt/old", "/mnt/new"), ("/vault a", "/vault b")],
+        )
+
+    def test_replace_path_prefix_rewrites_vault_root(self):
+        mapped = zsync.replace_path_prefix(
+            "/mnt/old/vaults/a",
+            [("/mnt/old", "/srv/obsidian")],
+        )
+
+        self.assertEqual(mapped, "/srv/obsidian/vaults/a")
+
+    def test_sanitize_obsidian_folder_name_replaces_invalid_chars(self):
+        clean = zsync.sanitize_obsidian_folder_name('Pasta: "A/B"?', 'fallback')
+        self.assertEqual(clean, "Pasta_ _A_B__")
+
+    def test_parse_path_map_entries_rejects_invalid_rule(self):
+        with self.assertRaises(SystemExit):
+            zsync.parse_path_map_entries(["sem-separador"])
+
     def test_hash_match_selection_prefers_metadata_name_matching_drive(self):
         parent_a = make_item(
             "PARENTA",

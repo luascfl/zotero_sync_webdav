@@ -37,6 +37,26 @@ This repository contains automation scripts for a personal Linux Zotero/WebDAV w
   ```
 - Obsidian mirror dry run:
   ```bash
+  python3 zotero_sync_webdav.py obsidian-mirror --dry-run
+  ```
+- Obsidian config verify:
+  ```bash
+  python3 zotero_sync_webdav.py obsidian-verify --kind auto
+  ```
+- Obsidian config export:
+  ```bash
+  python3 zotero_sync_webdav.py obsidian-export --source auto --out /tmp/obsidian-bundle
+  ```
+- Obsidian config apply:
+  ```bash
+  python3 zotero_sync_webdav.py obsidian-apply --target deb --bundle /tmp/obsidian-bundle --dry-run
+  ```
+- Obsidian combined setup:
+  ```bash
+  python3 zotero_sync_webdav.py obsidian-setup --target deb --bundle /tmp/obsidian-bundle --dry-run
+  ```
+- Legacy mirror wrapper:
+  ```bash
   python3 zotero_mirror_collections_to_obsidian.py --dry-run
   ```
 

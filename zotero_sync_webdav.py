@@ -3129,6 +3129,493 @@ def materialize_zotero_attachments_to_drive(
             stats['errors'] += 1
             logging.error("[ZOT->DRIVE] Falha ao materializar anexo %s em '%s': %s", key, dest_path, exc)
 
+
+DEFAULT_OBSIDIAN_SNAP_APP_DIR = Path.home() / "snap/obsidian/current/.config/obsidian"
+DEFAULT_OBSIDIAN_DEB_APP_DIR = Path.home() / ".config/obsidian"
+DEFAULT_OBSIDIAN_TARGET_ROOT = Path.home() / "Documentos/ObsidianLocal"
+INVALID_OBSIDIAN_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
+
+
+def obsidian_log(msg: str) -> None:
+    print(f"[obsidian] {msg}")
+
+
+def obsidian_fail(msg: str, code: int = 1) -> None:
+    print(f"[obsidian][erro] {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def obsidian_is_windows_noop(kind: str) -> bool:
+    return kind == "windows" and os.name != "nt"
+
+
+def parse_path_map_entries(entries: List[str] | None) -> List[Tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for raw in entries or []:
+        if "=" not in raw:
+            obsidian_fail(f"Mapeamento inválido '{raw}'. Use FORMATO antigo=novo")
+        old, new = raw.split("=", 1)
+        old = old.strip()
+        new = new.strip()
+        if not old or not new:
+            obsidian_fail(f"Mapeamento inválido '{raw}'. Lados antigo e novo são obrigatórios")
+        pairs.append((old, new))
+    return pairs
+
+
+def replace_path_prefix(text: str, pairs: List[Tuple[str, str]]) -> str:
+    for old, new in pairs:
+        if text == old or text.startswith(old.rstrip("/") + "/"):
+            suffix = text[len(old.rstrip("/")):]
+            return new.rstrip("/") + suffix
+    return text
+
+
+def default_windows_obsidian_app_dir() -> Path:
+    if os.name != "nt":
+        obsidian_fail("Diretório padrão do Windows só é resolvido no próprio Windows")
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        obsidian_fail("APPDATA não definido no Windows")
+    return Path(appdata) / "Obsidian"
+
+
+def windows_style_path(path: str) -> str:
+    return path.replace("/", "\\\\")
+
+
+def resolve_obsidian_app_dir(kind: str, explicit_app_dir: str | None) -> Tuple[str, Path]:
+    if explicit_app_dir:
+        return kind, Path(explicit_app_dir).expanduser()
+
+    if kind == "snap":
+        return kind, DEFAULT_OBSIDIAN_SNAP_APP_DIR
+    if kind == "deb":
+        return kind, DEFAULT_OBSIDIAN_DEB_APP_DIR
+    if kind == "windows":
+        return kind, default_windows_obsidian_app_dir()
+
+    if os.name == "nt":
+        windows_dir = default_windows_obsidian_app_dir()
+        if windows_dir.exists():
+            return "windows", windows_dir
+
+    for candidate_kind, candidate_path in [
+        ("snap", DEFAULT_OBSIDIAN_SNAP_APP_DIR),
+        ("deb", DEFAULT_OBSIDIAN_DEB_APP_DIR),
+    ]:
+        if candidate_path.exists():
+            return candidate_kind, candidate_path
+
+    obsidian_fail(
+        "Não foi possível detectar instalação do Obsidian. Use --source/--target explícito e --app-dir"
+    )
+    raise AssertionError("unreachable")
+
+
+def read_json_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        obsidian_fail(f"Arquivo não encontrado: {path}")
+    except json.JSONDecodeError as exc:
+        obsidian_fail(f"JSON inválido em {path}: {exc}")
+    raise AssertionError("unreachable")
+
+
+def write_json_file(path: Path, payload: dict, dry_run: bool) -> None:
+    if dry_run:
+        obsidian_log(f"[dry-run] escrever JSON em {path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def backup_existing_path(path: Path, dry_run: bool) -> Path | None:
+    if not path.exists():
+        return None
+    backup = path.parent / f"{path.name}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    if dry_run:
+        obsidian_log(f"[dry-run] backup {path} -> {backup}")
+        return backup
+    shutil.move(str(path), str(backup))
+    return backup
+
+
+def copy_tree_checked(src: Path, dst: Path, dry_run: bool) -> None:
+    if not src.exists():
+        obsidian_fail(f"Origem não encontrada: {src}")
+    if dry_run:
+        obsidian_log(f"[dry-run] copiar árvore {src} -> {dst}")
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+
+
+def copy_file_checked(src: Path, dst: Path, dry_run: bool) -> None:
+    if not src.exists():
+        obsidian_fail(f"Arquivo origem não encontrado: {src}")
+    if dry_run:
+        obsidian_log(f"[dry-run] copiar arquivo {src} -> {dst}")
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+
+
+def inspect_obsidian_config(kind: str, app_dir: Path) -> dict:
+    report = {
+        "kind": kind,
+        "app_dir": str(app_dir),
+        "skipped": False,
+        "errors": [],
+        "app_dir_exists": app_dir.exists(),
+        "obsidian_json_exists": False,
+        "obsidian_json_valid": False,
+        "vault_total": 0,
+        "vault_existing_path": 0,
+        "vault_with_obsidian_dir": 0,
+        "vault_with_remotely_save": 0,
+        "vault_missing_paths": [],
+        "ready": False,
+    }
+
+    if obsidian_is_windows_noop(kind):
+        report["skipped"] = True
+        report["ready"] = True
+        return report
+
+    if not app_dir.exists():
+        report["errors"].append("diretório do app não existe")
+        return report
+
+    obsidian_json_path = app_dir / "obsidian.json"
+    if not obsidian_json_path.exists():
+        report["errors"].append("obsidian.json não encontrado")
+        return report
+
+    report["obsidian_json_exists"] = True
+    try:
+        payload = json.loads(obsidian_json_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        report["errors"].append(f"obsidian.json inválido: {exc}")
+        return report
+
+    report["obsidian_json_valid"] = True
+    vaults = payload.get("vaults", {})
+    if not isinstance(vaults, dict):
+        report["errors"].append("campo 'vaults' não é objeto")
+        return report
+
+    report["vault_total"] = len(vaults)
+    for vault_id, vault_info in vaults.items():
+        vault_path_raw = str(vault_info.get("path", "")).strip()
+        if not vault_path_raw:
+            report["vault_missing_paths"].append(f"{vault_id}:<vazio>")
+            continue
+        vault_path = Path(vault_path_raw).expanduser()
+        if vault_path.exists():
+            report["vault_existing_path"] += 1
+        else:
+            report["vault_missing_paths"].append(f"{vault_id}:{vault_path_raw}")
+            continue
+        obsidian_dir = vault_path / ".obsidian"
+        if obsidian_dir.exists():
+            report["vault_with_obsidian_dir"] += 1
+            if (obsidian_dir / "plugins/remotely-save/data.json").exists():
+                report["vault_with_remotely_save"] += 1
+
+    report["ready"] = report["obsidian_json_valid"]
+    return report
+
+
+def print_obsidian_report(title: str, report: dict) -> None:
+    obsidian_log(f"{title} | kind={report['kind']} | app={report['app_dir']}")
+    if report["skipped"]:
+        obsidian_log("Verificação ignorada: windows em Linux (no-op)")
+        return
+    obsidian_log(
+        "Resumo: "
+        f"app_dir_exists={report['app_dir_exists']} "
+        f"obsidian_json_exists={report['obsidian_json_exists']} "
+        f"obsidian_json_valid={report['obsidian_json_valid']} "
+        f"vault_total={report['vault_total']} "
+        f"vault_existing_path={report['vault_existing_path']} "
+        f"vault_with_obsidian_dir={report['vault_with_obsidian_dir']} "
+        f"vault_with_remotely_save={report['vault_with_remotely_save']}"
+    )
+    for err in report["errors"]:
+        obsidian_log(f"Erro: {err}")
+    missing = report["vault_missing_paths"]
+    if missing:
+        preview = ", ".join(missing[:5])
+        suffix = " ..." if len(missing) > 5 else ""
+        obsidian_log(f"Vaults com path ausente/ inválido ({len(missing)}): {preview}{suffix}")
+
+
+def sanitize_obsidian_folder_name(name: str, fallback: str) -> str:
+    clean = INVALID_OBSIDIAN_FS_CHARS.sub("_", name or "")
+    clean = re.sub(r"\\s+", " ", clean).strip(" .")
+    return clean or fallback
+
+
+def resolve_obsidian_mirror_target_root(target_root: str | None) -> Path:
+    target_root_raw = (
+        target_root
+        or os.environ.get("OBSIDIAN_ZOTERO_MIRROR_ROOT", "").strip()
+        or str(DEFAULT_OBSIDIAN_TARGET_ROOT)
+    )
+    return Path(os.path.expanduser(target_root_raw)).resolve()
+
+
+def mirror_zotero_collections_to_obsidian(
+    zot: zotero.Zotero,
+    target_root: Path,
+    apply_changes: bool,
+) -> dict:
+    collections = zot.everything(zot.collections())
+    obsidian_log(f"Coleções encontradas: {len(collections)}")
+    obsidian_log(f"Destino Obsidian: {target_root}")
+    obsidian_log(f"Modo: {'APPLY' if apply_changes else 'DRY-RUN'}")
+
+    by_key: dict[str, dict] = {}
+    children: dict[str | None, list[str]] = {}
+    for col in collections:
+        key = col.get("key")
+        data = col.get("data", {})
+        if not key:
+            continue
+        by_key[key] = {
+            "key": key,
+            "name": data.get("name", ""),
+            "parent": data.get("parentCollection") or None,
+        }
+
+    for key, payload in by_key.items():
+        parent = payload["parent"]
+        if parent and parent not in by_key:
+            parent = None
+        children.setdefault(parent, []).append(key)
+
+    created = 0
+    existed = 0
+    collisions = 0
+
+    def mirror_subtree(parent_key: str | None, base_path: Path) -> None:
+        nonlocal created, existed, collisions
+        sibling_keys = children.get(parent_key, [])
+        sibling_keys.sort(key=lambda k: (by_key[k]["name"] or "").casefold())
+        used_names: dict[str, int] = {}
+        for key in sibling_keys:
+            original_name = by_key[key]["name"]
+            fallback = f"collection-{key.lower()}"
+            safe_name = sanitize_obsidian_folder_name(original_name, fallback)
+            if safe_name in used_names:
+                used_names[safe_name] += 1
+                safe_name = f"{safe_name} ({used_names[safe_name]})"
+                collisions += 1
+            else:
+                used_names[safe_name] = 1
+            next_path = base_path / safe_name
+            if next_path.exists():
+                existed += 1
+                print(f"= {next_path}")
+            else:
+                created += 1
+                if apply_changes:
+                    next_path.mkdir(parents=True, exist_ok=True)
+                    print(f"+ {next_path}")
+                else:
+                    print(f"~ {next_path}")
+            mirror_subtree(key, next_path)
+
+    if apply_changes:
+        target_root.mkdir(parents=True, exist_ok=True)
+    mirror_subtree(None, target_root)
+    obsidian_log(f"pastas já existentes: {existed}")
+    obsidian_log(f"pastas criadas{' (simuladas)' if not apply_changes else ''}: {created}")
+    obsidian_log(f"colisões de nome resolvidas: {collisions}")
+    return {
+        "existing": existed,
+        "created": created,
+        "collisions": collisions,
+        "collection_total": len(collections),
+        "target_root": str(target_root),
+        "apply": apply_changes,
+    }
+
+
+def run_obsidian_verify_mode(args: argparse.Namespace) -> None:
+    if obsidian_is_windows_noop(args.kind):
+        obsidian_log("kind=windows em Linux, nenhuma ação executada (no-op)")
+        return
+    kind, app_dir = resolve_obsidian_app_dir(args.kind, args.app_dir)
+    report = inspect_obsidian_config(kind, app_dir)
+    print_obsidian_report("Verificação", report)
+    if args.strict and not report["ready"]:
+        obsidian_fail("Verificação falhou em modo --strict")
+
+
+def run_obsidian_export_mode(args: argparse.Namespace) -> None:
+    if obsidian_is_windows_noop(args.source):
+        obsidian_log("source=windows em Linux, nenhuma ação executada (no-op)")
+        return
+    source_kind, app_dir = resolve_obsidian_app_dir(args.source, args.app_dir)
+    source_report = inspect_obsidian_config(source_kind, app_dir)
+    print_obsidian_report("Pré-verificação (export)", source_report)
+    if not source_report["ready"]:
+        obsidian_fail("Configuração de origem inválida para exportar")
+
+    obsidian_json_path = app_dir / "obsidian.json"
+    obsidian_json = read_json_file(obsidian_json_path)
+    out_dir = Path(args.out).expanduser()
+    if out_dir.exists() and not args.force:
+        obsidian_fail(f"Diretório de saída já existe: {out_dir}. Use --force para sobrescrever")
+    if out_dir.exists() and args.force and not args.dry_run:
+        shutil.rmtree(out_dir)
+
+    app_bundle = out_dir / "app"
+    vaults_bundle = out_dir / "vaults"
+    for candidate in app_dir.glob("*.json"):
+        copy_file_checked(candidate, app_bundle / candidate.name, args.dry_run)
+
+    vaults_info: dict[str, dict] = obsidian_json.get("vaults", {})
+    exported = 0
+    skipped = 0
+    for vault_id, info in vaults_info.items():
+        vault_path = Path(info.get("path", "")).expanduser()
+        obsidian_dir = vault_path / ".obsidian"
+        bundle_target = vaults_bundle / vault_id / ".obsidian"
+        if obsidian_dir.exists():
+            copy_tree_checked(obsidian_dir, bundle_target, args.dry_run)
+            exported += 1
+        else:
+            skipped += 1
+            obsidian_log(f"Aviso: vault '{vault_id}' sem pasta .obsidian em {obsidian_dir}")
+
+    manifest = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source_kind": source_kind,
+        "source_app_dir": str(app_dir),
+        "vault_count": len(vaults_info),
+        "exported_vault_count": exported,
+        "skipped_vault_count": skipped,
+    }
+    write_json_file(out_dir / "manifest.json", manifest, args.dry_run)
+    obsidian_log(f"Bundle exportado em: {out_dir}")
+    obsidian_log(f"Vaults exportados: {exported}, ignorados: {skipped}")
+
+
+def resolve_target_vault_path(
+    original_path: str,
+    target_kind: str,
+    map_pairs: List[Tuple[str, str]],
+) -> str:
+    mapped = replace_path_prefix(original_path, map_pairs)
+    if target_kind == "windows":
+        mapped = windows_style_path(mapped)
+    return mapped
+
+
+def run_obsidian_apply_mode(args: argparse.Namespace) -> None:
+    if obsidian_is_windows_noop(args.target):
+        obsidian_log("target=windows em Linux, nenhuma ação executada (no-op)")
+        return
+
+    bundle_dir = Path(args.bundle).expanduser()
+    if not bundle_dir.exists():
+        obsidian_fail(f"Bundle não encontrado: {bundle_dir}")
+    app_bundle = bundle_dir / "app"
+    vaults_bundle = bundle_dir / "vaults"
+    source_obsidian_json = read_json_file(app_bundle / "obsidian.json")
+
+    target_kind, target_app_dir = resolve_obsidian_app_dir(args.target, args.app_dir)
+    map_pairs = parse_path_map_entries(args.map)
+    pre_report = inspect_obsidian_config(target_kind, target_app_dir)
+    print_obsidian_report("Pré-verificação (apply)", pre_report)
+
+    if target_app_dir.exists():
+        for existing_json in target_app_dir.glob("*.json"):
+            backup_existing_path(existing_json, args.dry_run)
+
+    for bundled_json in app_bundle.glob("*.json"):
+        if bundled_json.name == "obsidian.json":
+            continue
+        copy_file_checked(bundled_json, target_app_dir / bundled_json.name, args.dry_run)
+
+    source_vaults: dict[str, dict] = source_obsidian_json.get("vaults", {})
+    target_vaults: dict[str, dict] = {}
+    for vault_id, vault_info in source_vaults.items():
+        original_path = str(vault_info.get("path", "")).strip()
+        if not original_path:
+            obsidian_log(f"Aviso: vault '{vault_id}' sem path válido. Ignorando")
+            continue
+
+        mapped_path = resolve_target_vault_path(original_path, target_kind, map_pairs)
+        local_vault_path = Path(mapped_path).expanduser()
+        if target_kind == "windows" and os.name == "nt":
+            local_vault_path = Path(mapped_path)
+
+        if not local_vault_path.exists():
+            if args.create_missing_vaults:
+                if args.dry_run:
+                    obsidian_log(f"[dry-run] criar vault ausente: {local_vault_path}")
+                else:
+                    local_vault_path.mkdir(parents=True, exist_ok=True)
+            else:
+                obsidian_log(
+                    f"Aviso: vault '{vault_id}' não existe em {local_vault_path}. Use --create-missing-vaults para criar"
+                )
+                continue
+
+        target_obsidian_dir = local_vault_path / ".obsidian"
+        backup_existing_path(target_obsidian_dir, args.dry_run)
+        source_obsidian_dir = vaults_bundle / vault_id / ".obsidian"
+        if source_obsidian_dir.exists():
+            copy_tree_checked(source_obsidian_dir, target_obsidian_dir, args.dry_run)
+        else:
+            obsidian_log(f"Aviso: bundle sem .obsidian para vault '{vault_id}'")
+
+        target_vaults[vault_id] = {
+            **vault_info,
+            "path": mapped_path,
+        }
+
+    rewritten = {
+        **source_obsidian_json,
+        "vaults": target_vaults,
+    }
+    write_json_file(target_app_dir / "obsidian.json", rewritten, args.dry_run)
+    post_report = inspect_obsidian_config(target_kind, target_app_dir)
+    print_obsidian_report("Pós-verificação (apply)", post_report)
+    obsidian_log(f"Configuração aplicada em: {target_app_dir}")
+    obsidian_log(f"Vaults configurados: {len(target_vaults)}")
+
+
+def run_obsidian_mirror_mode(args: argparse.Namespace) -> None:
+    apply_changes = args.apply and not args.dry_run
+    target_root = resolve_obsidian_mirror_target_root(args.target_root)
+    obsidian_log("Conectando ao Zotero para espelhar coleções...")
+    zot = connect_zotero_client()
+    mirror_zotero_collections_to_obsidian(zot, target_root, apply_changes)
+
+
+def run_obsidian_setup_mode(args: argparse.Namespace) -> None:
+    dry_run = args.dry_run or not args.apply
+    apply_args = argparse.Namespace(
+        target=args.target,
+        app_dir=args.app_dir,
+        bundle=args.bundle,
+        map=args.map,
+        create_missing_vaults=args.create_missing_vaults,
+        dry_run=dry_run,
+    )
+    mirror_args = argparse.Namespace(
+        target_root=args.target_root,
+        dry_run=dry_run,
+        apply=args.apply,
+    )
+    run_obsidian_apply_mode(apply_args)
+    run_obsidian_mirror_mode(mirror_args)
 def build_cli_parser() -> argparse.ArgumentParser:
     """Constrói a CLI unificada do workflow Zotero/WebDAV."""
     parser = argparse.ArgumentParser(
@@ -3148,6 +3635,63 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Apaga de verdade os anexos duplicados',
     )
+
+
+    obsidian_verify_parser = subparsers.add_parser(
+        'obsidian-verify',
+        help='Verifica a configuração atual do Obsidian',
+    )
+    obsidian_verify_parser.add_argument('--kind', choices=['auto', 'snap', 'deb', 'windows'], default='auto')
+    obsidian_verify_parser.add_argument('--app-dir', help='Diretório do app Obsidian (override manual)')
+    obsidian_verify_parser.add_argument('--strict', action='store_true', help='Falha se a configuração estiver inválida')
+
+    obsidian_export_parser = subparsers.add_parser(
+        'obsidian-export',
+        help='Exporta configuração do Obsidian para um bundle',
+    )
+    obsidian_export_parser.add_argument('--source', choices=['auto', 'snap', 'deb', 'windows'], default='auto')
+    obsidian_export_parser.add_argument('--app-dir', help='Diretório do app Obsidian (override manual)')
+    obsidian_export_parser.add_argument('--out', required=True, help='Diretório de saída do bundle')
+    obsidian_export_parser.add_argument('--force', action='store_true', help='Sobrescreve bundle existente')
+    obsidian_export_parser.add_argument('--dry-run', action='store_true', help='Simula sem escrever')
+
+    obsidian_apply_parser = subparsers.add_parser(
+        'obsidian-apply',
+        help='Aplica um bundle de configuração do Obsidian',
+    )
+    obsidian_apply_parser.add_argument('--target', choices=['auto', 'snap', 'deb', 'windows'], required=True)
+    obsidian_apply_parser.add_argument('--app-dir', help='Diretório do app Obsidian (override manual)')
+    obsidian_apply_parser.add_argument('--bundle', required=True, help='Diretório do bundle exportado')
+    obsidian_apply_parser.add_argument('--map', action='append', help='Mapeia prefixo de path: antigo=novo')
+    obsidian_apply_parser.add_argument('--create-missing-vaults', action='store_true', help='Cria vaults ausentes no destino')
+    obsidian_apply_parser.add_argument('--dry-run', action='store_true', help='Simula sem escrever')
+
+    obsidian_mirror_parser = subparsers.add_parser(
+        'obsidian-mirror',
+        help='Espelha coleções do Zotero como pastas no Obsidian',
+    )
+    obsidian_mirror_parser.add_argument(
+        '--target-root',
+        help='Diretório raiz de destino no Obsidian. Padrão: OBSIDIAN_ZOTERO_MIRROR_ROOT ou ~/Documentos/ObsidianLocal',
+    )
+    obsidian_mirror_parser.add_argument('--dry-run', action='store_true', help='Só mostra o que faria, sem criar pastas')
+    obsidian_mirror_parser.add_argument('--apply', action='store_true', help='Aplica de fato a criação das pastas')
+
+    obsidian_setup_parser = subparsers.add_parser(
+        'obsidian-setup',
+        help='Aplica configuração do Obsidian e espelha coleções do Zotero',
+    )
+    obsidian_setup_parser.add_argument('--target', choices=['auto', 'snap', 'deb', 'windows'], required=True)
+    obsidian_setup_parser.add_argument('--app-dir', help='Diretório do app Obsidian (override manual)')
+    obsidian_setup_parser.add_argument('--bundle', required=True, help='Diretório do bundle exportado')
+    obsidian_setup_parser.add_argument('--map', action='append', help='Mapeia prefixo de path: antigo=novo')
+    obsidian_setup_parser.add_argument('--create-missing-vaults', action='store_true', help='Cria vaults ausentes no destino')
+    obsidian_setup_parser.add_argument(
+        '--target-root',
+        help='Diretório raiz de destino no Obsidian para o espelho das coleções',
+    )
+    obsidian_setup_parser.add_argument('--dry-run', action='store_true', help='Simula sem escrever')
+    obsidian_setup_parser.add_argument('--apply', action='store_true', help='Aplica de fato configuração e espelho')
 
     setup_parser = subparsers.add_parser(
         'setup-autostart',
@@ -3877,6 +4421,22 @@ def main(argv: List[str] | None = None) -> None:
     if args.command == 'setup-autostart':
         run_setup_autostart_mode(args.setup_args)
         return
+    if args.command == 'obsidian-verify':
+        run_obsidian_verify_mode(args)
+        return
+    if args.command == 'obsidian-export':
+        run_obsidian_export_mode(args)
+        return
+    if args.command == 'obsidian-apply':
+        run_obsidian_apply_mode(args)
+        return
+    if args.command == 'obsidian-mirror':
+        run_obsidian_mirror_mode(args)
+        return
+    if args.command == 'obsidian-setup':
+        run_obsidian_setup_mode(args)
+        return
+
 
     parser.error(f'Comando não suportado: {args.command}')
 
