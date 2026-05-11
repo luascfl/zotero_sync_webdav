@@ -12,8 +12,7 @@ status: filled
 The main data path starts with local configuration, then combines Zotero attachment metadata with local WebDAV PDFs and local Zotero storage files. The script uses normalized names and SHA-256 hashes to decide whether each PDF is already synced, updated, renamed, or new.
 
 ## Module dependencies
-- `zotero_sync_webdav.py` depends on `pyzotero`, `tqdm`, the Python standard library, the WebDAV mount, local Zotero storage, and the embedded autostart shell backend.
-- `zotero_mirror_collections_to_obsidian.py` depends on `pyzotero` and a local target directory for Obsidian.
+- `zotero_sync_webdav.py` depends on `pyzotero`, `tqdm`, the Python standard library, the WebDAV mount, local Zotero storage, the embedded autostart shell backend, and the merged Obsidian workflow helpers.
 
 ## High-level main sync flow
 1. Load environment variables from `.env` or the configured environment file.

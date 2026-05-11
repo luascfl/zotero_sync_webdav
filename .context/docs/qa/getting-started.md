@@ -31,7 +31,7 @@ OBSIDIAN_ZOTERO_MIRROR_ROOT=/path/to/ObsidianLocal
 ## Run commands
 - Validate syntax:
   ```bash
-  python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
+  python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py
   ```
 - Run the main sync:
   ```bash
@@ -47,5 +47,5 @@ OBSIDIAN_ZOTERO_MIRROR_ROOT=/path/to/ObsidianLocal
   ```
 - Mirror Zotero collections to Obsidian folders in dry-run mode:
   ```bash
-  python3 zotero_mirror_collections_to_obsidian.py --dry-run
+  python3 zotero_sync_webdav.py obsidian-mirror --dry-run
   ```

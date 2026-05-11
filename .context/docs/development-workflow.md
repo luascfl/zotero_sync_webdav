@@ -20,7 +20,7 @@ Use the GSD plus Ralph workflow for changes. GSD defines milestones and dependen
 ## Local development
 - Syntax gate:
   ```bash
-  python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
+  python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py
   ```
 - Main sync:
   ```bash
@@ -44,7 +44,7 @@ Use the GSD plus Ralph workflow for changes. GSD defines milestones and dependen
   ```
 - Obsidian mirror dry run:
   ```bash
-  python3 zotero_mirror_collections_to_obsidian.py --dry-run
+  python3 zotero_sync_webdav.py obsidian-mirror --dry-run
   ```
 
 ## Code review expectations

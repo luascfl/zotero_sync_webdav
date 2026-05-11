@@ -33,8 +33,7 @@ The primary topology is a local automation script that reads configuration from 
 | Paged API collection | High | `collect_all_attachments`, `fetch_all_attachments` | Walks Zotero attachment pages to avoid incomplete indexes. |
 
 ## Entry points
-- `zotero_sync_webdav.py`: primary unified automation path with subcommands for sync, diagnostics, duplicate cleanup, and autostart setup.
-- `zotero_mirror_collections_to_obsidian.py`: folder mirror path.
+- `zotero_sync_webdav.py`: primary unified automation path with subcommands for sync, diagnostics, duplicate cleanup, autostart setup, and Obsidian workflows.
 
 ## Public API surface
 Important callable units observed in the unified script include `collect_all_pdfs`, `collect_all_attachments`, `compute_sha256`, `rename_webdav_file`, `rename_local_attachment`, `copy_to_local_storage`, `build_duplicate_groups`, `find_missing_drive_pdfs_in_zotero`, `run_diagnostic_mode`, and `run_duplicate_cleanup_mode`.

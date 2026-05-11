@@ -20,8 +20,7 @@ status: filled
 - Secrets and paths: `.env` or `~/.config/zotero_sync_webdav/zotero_sync.env`.
 
 ## Entry points
-- [`zotero_sync_webdav.py`](../../zotero_sync_webdav.py): primary unified CLI for sync, diagnostics, duplicate cleanup, and autostart setup.
-- [`zotero_mirror_collections_to_obsidian.py`](../../zotero_mirror_collections_to_obsidian.py): mirrors Zotero collections into Obsidian folders.
+- [`zotero_sync_webdav.py`](../../zotero_sync_webdav.py): primary unified CLI for sync, diagnostics, duplicate cleanup, autostart setup, and Obsidian commands.
 
 ## Code organization
 - Root Python scripts hold all runtime behavior.
@@ -37,7 +36,7 @@ The project uses Python scripts instead of a package layout. It talks to Zotero 
 1. Create `.env` or `~/.config/zotero_sync_webdav/zotero_sync.env` with `ZOTERO_LIBRARY_ID`, `ZOTERO_LIBRARY_TYPE`, `ZOTERO_API_KEY`, and `ZOTERO_SYNC_TARGET_FOLDER`.
 2. Ensure the WebDAV folder is mounted and readable.
 3. Install runtime dependencies, at least `pyzotero` and `tqdm`.
-4. Run syntax validation with `python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py`.
+4. Run syntax validation with `python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py`.
 5. Run `python3 zotero_sync_webdav.py diagnostico` before destructive cleanup work.
 6. Run `python3 zotero_sync_webdav.py` for the automated sync path.
 

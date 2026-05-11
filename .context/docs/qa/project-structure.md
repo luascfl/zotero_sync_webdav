@@ -9,8 +9,7 @@ generatedAt: 2026-04-30
 The repository is currently organized as root-level Python scripts plus `.context` governance files.
 
 ## Runtime scripts
-- `zotero_sync_webdav.py`: primary unified sync CLI between mounted WebDAV PDFs, Zotero attachments, local Zotero storage, diagnostics, duplicate cleanup, and autostart setup.
-- `zotero_mirror_collections_to_obsidian.py`: creates an Obsidian folder tree from Zotero collections.
+- `zotero_sync_webdav.py`: primary unified sync CLI between mounted WebDAV PDFs, Zotero attachments, local Zotero storage, diagnostics, duplicate cleanup, autostart setup, and Obsidian workflows.
 
 ## Context and workflow
 - `.context/docs/`: official technical documentation.

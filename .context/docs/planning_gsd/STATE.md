@@ -42,7 +42,7 @@ Dependencies:
 - Syntax and test quality gates pass.
 
 ## Validation checklist for next story
-- `python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py`
+- `python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py`
 - `python3 -m unittest discover -s tests`
 - Confirm no live Zotero API call is made during unit tests.
 - Confirm `.context/docs/planning_gsd/STATE.md` is updated with evidence.
@@ -74,7 +74,7 @@ Required behavior:
 - Add unittest coverage for import-safety, resolve_target_folder, normalize_filename, normalize_aggressive, and _coerce_response_items malformed/empty cases.
 
 Verification:
-- Run: python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
+- Run: python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py
 - Run: python3 -m unittest discover -s tests
 - Update .context/docs/planning_gsd/STATE.md with exact validation evidence.
 
@@ -199,3 +199,4 @@ Return a concise result with files changed and command results.
  - 2026-05-11: refined copy-marker detection to stop treating plain titles ending in `1.pdf` as copies. The copy normalization rule now strips only explicit copy prefixes (`Cópia de`, `Copy of`) and parenthesized suffixes like `(1)`, avoiding false positives such as `Slides 1.pdf` or `PEBR - prova versão 1.pdf`.
  - 2026-05-11: validation passed for the refined copy prepass: `python3 -m unittest discover -s tests` ran 46 tests OK, `python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py zotero_storage_quota_audit.py` passed, and a real recursive scan over `/home/lucas/Google Drive/zoterodb` found `0` remaining copy-variant filenames after the prepass cleanup.
  - 2026-05-11: unified the local plugin artifact naming. The source tree was renamed from `zotero_desktop_recognizer/` to `zotero_sync_recognizer/`, while the packaged installer remains `zotero-sync-recognizer.xpi`. The XPI and source tree still represent the same single plugin: the folder is the editable source and the `.xpi` is the installable package built from it.
+ - 2026-05-11: removed the obsolete compatibility wrapper `zotero_mirror_collections_to_obsidian.py` after confirming that its functionality had already been merged into `zotero_sync_webdav.py` as the `obsidian-mirror` subcommand. Current syntax validation now targets `zotero_sync_webdav.py` and `zotero_storage_quota_audit.py`.

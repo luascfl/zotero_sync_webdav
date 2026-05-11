@@ -13,7 +13,7 @@ This repository contains automation scripts for a personal Linux Zotero/WebDAV w
 ## Current commands
 - Syntax check active scripts:
   ```bash
-  python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py zotero_storage_quota_audit.py
+  python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py
   ```
 - Main sync:
   ```bash
@@ -55,10 +55,7 @@ This repository contains automation scripts for a personal Linux Zotero/WebDAV w
   ```bash
   python3 zotero_sync_webdav.py obsidian-setup --target deb --bundle /tmp/obsidian-bundle --dry-run
   ```
-- Legacy mirror wrapper:
-  ```bash
-  python3 zotero_mirror_collections_to_obsidian.py --dry-run
-  ```
+
 
 - Storage audit:
   ```bash

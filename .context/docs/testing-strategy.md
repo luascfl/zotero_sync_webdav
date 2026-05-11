@@ -19,7 +19,7 @@ The repository currently has no observed automated test suite. The immediate har
 ## Running tests
 - Current syntax gate:
   ```bash
-  python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
+  python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py
   ```
 - Recommended first unit-test gate after US-001:
   ```bash
@@ -28,7 +28,7 @@ The repository currently has no observed automated test suite. The immediate har
 
 ## Quality gates
 The PRD currently sets these gates:
-- `python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py`
+- `python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py`
 - `python3 -m unittest discover -s tests`
 
 The unit-test gate is expected to become valid during the first hardening story, which creates the first tests.
