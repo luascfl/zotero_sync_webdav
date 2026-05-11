@@ -28,11 +28,38 @@ class StorageQuotaAuditTests(unittest.TestCase):
         self.assertEqual(audit.human_size(1024 * 1024), "1.0 MB")
         self.assertEqual(audit.human_size(None), "desconhecido")
 
+    def test_managed_attachment_backend_uses_webdav_setting(self):
+        settings = {"protocol": "webdav"}
+        self.assertEqual(audit.managed_attachment_backend("imported_file", settings), "webdav")
+        self.assertEqual(audit.managed_attachment_backend("linked_file", settings), "linked")
+
     def test_counts_toward_remote_storage(self):
         self.assertTrue(audit.counts_toward_remote_storage({"data": {"linkMode": "imported_file"}}))
         self.assertTrue(audit.counts_toward_remote_storage({"data": {"linkMode": "imported_url"}}))
         self.assertFalse(audit.counts_toward_remote_storage({"data": {"linkMode": "linked_file"}}))
         self.assertFalse(audit.counts_toward_remote_storage({"data": {"linkMode": "linked_url"}}))
+
+    def test_parse_pref_value_extracts_strings(self):
+        line = 'user_pref("extensions.zotero.sync.storage.protocol", "webdav");'
+        self.assertEqual(audit.parse_pref_value(line), "webdav")
+
+    def test_get_desktop_storage_settings_reads_protocol(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = Path(temp_dir)
+            prefs = profile / "prefs.js"
+            prefs.write_text(
+                'user_pref("extensions.zotero.sync.storage.protocol", "webdav");\n'
+                'user_pref("extensions.zotero.sync.storage.url", "app.koofr.net/dav/Koofr");\n',
+                encoding="utf-8",
+            )
+            original = audit.zsync.resolve_zotero_profile_dir
+            audit.zsync.resolve_zotero_profile_dir = lambda: profile
+            try:
+                settings = audit.get_desktop_storage_settings()
+            finally:
+                audit.zsync.resolve_zotero_profile_dir = original
+            self.assertEqual(settings["protocol"], "webdav")
+            self.assertEqual(settings["url"], "app.koofr.net/dav/Koofr")
 
     def test_resolve_attachment_local_path_uses_linked_file_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -75,38 +102,43 @@ class StorageQuotaAuditTests(unittest.TestCase):
                     }
                 }
             }
-            row = audit.build_attachment_audit_row(item, parents)
+            row = audit.build_attachment_audit_row(item, parents, {"protocol": "webdav"})
             self.assertEqual(row["parent_title"], "Artigo X")
             self.assertEqual(row["collections"], ["COL1"])
             self.assertTrue(row["local_exists"])
             self.assertEqual(row["size_bytes"], 5)
+            self.assertEqual(row["managed_backend"], "linked")
 
-    def test_summarize_rows_accumulates_remote_sizes(self):
+    def test_summarize_rows_accumulates_managed_backend_sizes(self):
         rows = [
             {
                 "link_mode": "imported_file",
+                "managed_backend": "webdav",
                 "size_bytes": 100,
                 "counts_toward_remote_storage": True,
             },
             {
                 "link_mode": "imported_file",
+                "managed_backend": "webdav",
                 "size_bytes": None,
                 "counts_toward_remote_storage": True,
             },
             {
                 "link_mode": "linked_file",
+                "managed_backend": "linked",
                 "size_bytes": 500,
                 "counts_toward_remote_storage": False,
             },
         ]
-        summary = audit.summarize_rows(rows)
-            
+        summary = audit.summarize_rows(rows, {"protocol": "webdav"})
+
         self.assertEqual(summary["attachment_total"], 3)
-        self.assertEqual(summary["remote_storage_total_bytes"], 100)
-        self.assertEqual(summary["remote_storage_known_size_count"], 1)
-        self.assertEqual(summary["remote_storage_missing_local_count"], 1)
+        self.assertEqual(summary["managed_backend_name"], "webdav")
+        self.assertEqual(summary["managed_backend_total_bytes"], 100)
+        self.assertEqual(summary["managed_backend_known_size_count"], 1)
+        self.assertEqual(summary["managed_backend_missing_local_count"], 1)
         self.assertEqual(summary["mode_breakdown"]["imported_file"]["count"], 2)
-        self.assertEqual(summary["mode_breakdown"]["linked_file"]["total_size_bytes"], 500)
+        self.assertEqual(summary["backend_breakdown"]["linked"]["total_size_bytes"], 500)
 
 
 if __name__ == "__main__":

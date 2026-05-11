@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zotero Sync Recognizer",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Exposes local HTTP endpoints for standalone PDF metadata recognition",
   "author": "Oh My Pi",
   "applications": {

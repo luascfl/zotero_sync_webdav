@@ -18,6 +18,34 @@ async function getItemByLibraryAndKey(libraryID, key) {
 	throw new Error("Zotero.Items.getByLibraryAndKeyAsync indisponível");
 }
 
+async function getItemByID(itemID) {
+	if (!itemID) {
+		return null;
+	}
+	if (Zotero.Items.getAsync) {
+		return Zotero.Items.getAsync(itemID);
+	}
+	if (Zotero.Items.get) {
+		return Zotero.Items.get(itemID);
+	}
+	throw new Error("Zotero.Items.getAsync indisponível");
+}
+
+async function getCollectionByLibraryAndKey(libraryID, key) {
+	if (!key) {
+		return null;
+	}
+	if (Zotero.Collections.getByLibraryAndKeyAsync) {
+		return Zotero.Collections.getByLibraryAndKeyAsync(libraryID, key);
+	}
+	if (Zotero.Collections.getByLibraryAndKey) {
+		return Zotero.Collections.getByLibraryAndKey(libraryID, key);
+	}
+	throw new Error("Zotero.Collections.getByLibraryAndKeyAsync indisponível");
+}
+
+
+
 function parsePayload(postData) {
 	if (!postData) {
 		return {};
@@ -78,8 +106,8 @@ async function createFallbackParent(item) {
 	return parentItem;
 }
 
-async function revealCreatedParents(parentItems) {
-	if (!parentItems.length) {
+async function revealItems(items) {
+	if (!items.length) {
 		return;
 	}
 	let win = Zotero.getMainWindow && Zotero.getMainWindow();
@@ -88,11 +116,11 @@ async function revealCreatedParents(parentItems) {
 	}
 	try {
 		if (typeof win.ZoteroPane.selectItems == "function") {
-			await win.ZoteroPane.selectItems(parentItems.map(item => item.id));
+			await win.ZoteroPane.selectItems(items.map(item => item.id));
 			return;
 		}
 		if (typeof win.ZoteroPane.selectItem == "function") {
-			await win.ZoteroPane.selectItem(parentItems[0].id);
+			await win.ZoteroPane.selectItem(items[0].id);
 		}
 	}
 	catch (e) {
@@ -100,9 +128,113 @@ async function revealCreatedParents(parentItems) {
 	}
 }
 
+async function postRecognizeFallback(libraryID, attachments) {
+	let createdParents = [];
+	for (let item of attachments) {
+		let latest = await getItemByLibraryAndKey(libraryID, item.key);
+		if (!latest) {
+			continue;
+		}
+		if (!latest.isTopLevelItem() || !latest.isAttachment()) {
+			let parentItem = await getItemByID(latest.parentItemID || latest.parentID);
+			if (parentItem) {
+				createdParents.push({
+					attachmentKey: item.key,
+					parentKey: parentItem.key,
+					parentTitle: parentItem.getField("title"),
+					source: "recognized",
+				});
+			}
+			continue;
+		}
+		let parentItem = await createFallbackParent(latest);
+		if (!parentItem) {
+			continue;
+		}
+		createdParents.push({
+			attachmentKey: item.key,
+			parentKey: parentItem.key,
+			parentTitle: parentItem.getField("title"),
+			source: "fallback",
+		});
+	}
+	if (createdParents.length) {
+		let parentItems = [];
+		for (let parent of createdParents) {
+			let item = await getItemByLibraryAndKey(libraryID, parent.parentKey);
+			if (item) {
+				parentItems.push(item);
+			}
+		}
+		await revealItems(parentItems);
+	}
+	return createdParents;
+}
+
+async function importAttachment(payload) {
+	let libraryID = payload.libraryID || Zotero.Libraries.userLibraryID;
+	let filePath = payload.filePath;
+	let parentKey = payload.parentKey || "";
+	let collectionKey = payload.collectionKey || "";
+	let title = payload.title;
+	let autoRecognize = payload.autoRecognize !== false;
+	if (!filePath) {
+		throw new Error("filePath é obrigatório");
+	}
+
+	let options = {
+		file: filePath,
+		libraryID,
+	};
+	if (title) {
+		options.title = title;
+	}
+	let parentItem = null;
+	if (parentKey) {
+		parentItem = await getItemByLibraryAndKey(libraryID, parentKey);
+		if (!parentItem) {
+			throw new Error("parentKey não encontrado");
+		}
+		options.parentItemID = parentItem.id;
+	}
+	else if (collectionKey) {
+		let collection = await getCollectionByLibraryAndKey(libraryID, collectionKey);
+		if (!collection) {
+			throw new Error(`Collection ${collectionKey} not found for item ${libraryID}/${parentKey || 'null'}`);
+		}
+		options.collections = [collection.id];
+	}
+
+	let attachment = await Zotero.Attachments.importFromFile(options);
+	let latestAttachment = await getItemByLibraryAndKey(libraryID, attachment.key);
+	let result = {
+		attachmentKey: attachment.key,
+		attachmentTitle: latestAttachment ? latestAttachment.getField("title") : "",
+		attachmentFilename: latestAttachment ? latestAttachment.attachmentFilename : "",
+		parentKey: parentItem ? parentItem.key : "",
+		parentTitle: parentItem ? parentItem.getField("title") : "",
+		fallbackParents: [],
+	};
+
+	if (!parentItem && autoRecognize && Zotero.RecognizeDocument.canRecognize(attachment)) {
+		await Zotero.RecognizeDocument.recognizeItems([attachment]);
+		result.fallbackParents = await postRecognizeFallback(libraryID, [attachment]);
+		latestAttachment = await getItemByLibraryAndKey(libraryID, attachment.key);
+		result.attachmentTitle = latestAttachment ? latestAttachment.getField("title") : result.attachmentTitle;
+		result.attachmentFilename = latestAttachment ? latestAttachment.attachmentFilename : result.attachmentFilename;
+		if (result.fallbackParents.length) {
+			result.parentKey = result.fallbackParents[0].parentKey;
+			result.parentTitle = result.fallbackParents[0].parentTitle;
+		}
+	}
+
+	return result;
+}
+
 function installEndpoints() {
 	var pingPath = "/zoteroSyncRecognize/ping";
 	var recognizePath = "/zoteroSyncRecognize/recognize";
+	var importPath = "/zoteroSyncRecognize/import";
 
 	var PingEndpoint = Zotero.Server.Endpoints[pingPath] = function () {};
 	PingEndpoint.prototype = {
@@ -123,7 +255,6 @@ function installEndpoints() {
 					let itemKeys = Array.isArray(payload.itemKeys) ? payload.itemKeys : [];
 					let items = [];
 					let skipped = [];
-					let createdParents = [];
 
 					for (let key of itemKeys) {
 						let item = await getItemByLibraryAndKey(libraryID, key);
@@ -142,38 +273,7 @@ function installEndpoints() {
 						await Zotero.RecognizeDocument.recognizeItems(items);
 					}
 
-					for (let item of items) {
-						let latest = await getItemByLibraryAndKey(libraryID, item.key);
-						if (!latest) {
-							skipped.push({ key: item.key, reason: "not_found_after_recognize" });
-							continue;
-						}
-						if (!latest.isTopLevelItem() || !latest.isAttachment()) {
-							continue;
-						}
-						let parentItem = await createFallbackParent(latest);
-						if (!parentItem) {
-							skipped.push({ key: item.key, reason: "fallback_parent_failed" });
-							continue;
-						}
-						createdParents.push({
-							attachmentKey: item.key,
-							parentKey: parentItem.key,
-							parentTitle: parentItem.getField("title"),
-						});
-					}
-
-					if (createdParents.length) {
-						let parentItems = [];
-						for (let parent of createdParents) {
-							let item = await getItemByLibraryAndKey(libraryID, parent.parentKey);
-							if (item) {
-								parentItems.push(item);
-							}
-						}
-						await revealCreatedParents(parentItems);
-					}
-
+					let createdParents = await postRecognizeFallback(libraryID, items);
 					respondJSON(sendResponseCallback, 200, {
 						requested: itemKeys.length,
 						processed: items.length,
@@ -193,7 +293,27 @@ function installEndpoints() {
 		}
 	};
 
-	ENDPOINTS = [pingPath, recognizePath];
+	var ImportEndpoint = Zotero.Server.Endpoints[importPath] = function () {};
+	ImportEndpoint.prototype = {
+		supportedMethods: ["POST"],
+		init: function (postData, sendResponseCallback) {
+			(async () => {
+				try {
+					let payload = parsePayload(postData);
+					let result = await importAttachment(payload);
+					respondJSON(sendResponseCallback, 200, result);
+				}
+				catch (e) {
+					Zotero.logError(e);
+					respondJSON(sendResponseCallback, 500, {
+						error: e && e.message ? e.message : String(e),
+					});
+				}
+			})();
+		}
+	};
+
+	ENDPOINTS = [pingPath, recognizePath, importPath];
 }
 
 function removeEndpoints() {

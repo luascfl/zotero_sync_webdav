@@ -4,7 +4,7 @@
   <Description about="urn:mozilla:install-manifest">
     <em:id>zotero-sync-recognizer@example.com</em:id>
     <em:name>Zotero Sync Recognizer</em:name>
-    <em:version>0.1.0</em:version>
+    <em:version>0.2.1</em:version>
     <em:creator>Oh My Pi</em:creator>
     <em:type>2</em:type>
     <em:bootstrap>true</em:bootstrap>

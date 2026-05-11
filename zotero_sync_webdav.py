@@ -243,6 +243,9 @@ ZOTERO_DESKTOP_RECOGNIZER_PING_URL = (
 ZOTERO_DESKTOP_RECOGNIZER_RECOGNIZE_URL = (
     f"{ZOTERO_DESKTOP_CONNECTOR_URL}/zoteroSyncRecognize/recognize"
 )
+ZOTERO_DESKTOP_RECOGNIZER_IMPORT_URL = (
+    f"{ZOTERO_DESKTOP_CONNECTOR_URL}/zoteroSyncRecognize/import"
+)
 ZOTERO_DESKTOP_RECOGNITION_ENABLED = get_env_bool(
     "ZOTERO_DESKTOP_RECOGNITION_ENABLED",
     True,
@@ -2580,6 +2583,29 @@ def ensure_desktop_recognizer_available(stats: dict) -> bool:
     return False
 
 
+def import_attachment_via_desktop(
+    file_path: str,
+    collection_key: str | None,
+    parent_key: str | None = None,
+    auto_recognize: bool = True,
+) -> dict | None:
+    """Importa anexo pelo Zotero Desktop para respeitar o backend WebDAV configurado."""
+    status, payload = request_local_json(
+        ZOTERO_DESKTOP_RECOGNIZER_IMPORT_URL,
+        payload={
+            "filePath": os.path.abspath(file_path),
+            "parentKey": parent_key or "",
+            "collectionKey": collection_key or "",
+            "autoRecognize": auto_recognize,
+        },
+        timeout_seconds=max(60, ZOTERO_DESKTOP_RECOGNIZE_TIMEOUT_SECONDS),
+    )
+    if status != 200 or not isinstance(payload, dict):
+        logging.warning("[DESKTOP] Falha ao importar '%s' via Zotero Desktop: %s", file_path, payload)
+        return None
+    return payload
+
+
 def normalize_standalone_attachment_names(
     zot: zotero.Zotero,
     attachments: List[dict],
@@ -4335,6 +4361,7 @@ def run_sync_mode():
         key_to_path,
         stats,
     )
+    desktop_import_available = ensure_desktop_recognizer_available(stats)
 
 
     # 3. Processar arquivos da pasta montada no drive.
@@ -4707,154 +4734,107 @@ def run_sync_mode():
             try:
                 if parent_key:
                     logging.info(
-                        "[CASO 4] Anexando '%s' ao item bibliográfico existente key=%s score=%.2f title='%s'.",
+                        "[CASO 4] Anexando '%s' ao item bibliográfico existente key=%s score=%.2f title='%s' via Zotero Desktop/WebDAV.",
                         file_name,
                         parent_key,
                         parent_match['score'],
                         parent_match['title'],
                     )
                 else:
-                    logging.info("[CASO 4] Adicionando '%s' ao Zotero como anexo top-level...", file_name)
-                response = zot.attachment_simple([file_path], parentid=parent_key)
-                if not response:
+                    logging.info("[CASO 4] Importando '%s' via Zotero Desktop/WebDAV...", file_name)
+
+                if not desktop_import_available:
                     existing_filenames.pop(norm_local, None)
                     existing_filenames_aggressive.pop(norm_local_aggressive, None)
                     stats['errors'] += 1
-                    logging.error("[ERRO] Resposta vazia ao adicionar '%s'.", file_name)
+                    logging.error(
+                        "[DESKTOP] Importação bloqueada para '%s': Zotero Desktop/endpoint local indisponível. "
+                        "O sync não fará fallback para upload via API porque isso consumiria a quota do Zotero.",
+                        file_name,
+                    )
                     continue
 
-                success_items = _coerce_response_items(response.get("success"))
-                unchanged_items = _coerce_response_items(response.get("unchanged"))
-                failure_items = _coerce_response_items(response.get("failure"))
-                handled = False
-
-                if success_items:
-                    new_key = success_items[0].get("key")
-                    if not new_key:
-                        existing_filenames.pop(norm_local, None)
-                        existing_filenames_aggressive.pop(norm_local_aggressive, None)
-                        stats['errors'] += 1
-                        logging.error("[ERRO] Chave não retornada para '%s'. Resposta: %s", file_name, response)
-                        continue
-                    stats['added'] += 1
-                    if parent_key:
-                        stats['attached_to_existing_parent'] += 1
-                    collection_changed = False
-                    info = {
-                        'original': file_name,
-                        'key': new_key,
-                        'dateModified': None,
-                        'relative_path': relative_drive_path,
-                        'collection_key': drive_collection_key,
-                    }
-                    copy_outcome = copy_to_local_storage(file_path, new_key, file_hash)
-                    if copy_outcome == "copied":
-                        stats['local_copies'] += 1
-                    elif copy_outcome is None:
-                        logging.warning("[COPIA-LOCAL] Não foi possível copiar '%s'.", file_name)
-                    local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, new_key))
-
-                    desired_new_name = (
-                        canonical_parent_pdf_filename(parent_items_by_key.get(parent_key))
-                        if parent_key else None
-                    )
-                    if desired_new_name and desired_new_name != file_name:
-                        metadata_changed = False
-                        if local_path and os.path.exists(local_path):
-                            if os.path.basename(local_path) != desired_new_name:
-                                updated_local = rename_local_attachment(zot, new_key, local_path, desired_new_name)
-                                if updated_local != local_path:
-                                    local_path = updated_local
-                                    stats['renamed_local'] += 1
-                                    metadata_changed = True
-                                else:
-                                    metadata_changed = update_zotero_attachment_filename(zot, new_key, desired_new_name)
-                            else:
-                                metadata_changed = update_zotero_attachment_filename(zot, new_key, desired_new_name)
-                        else:
-                            metadata_changed = update_zotero_attachment_filename(zot, new_key, desired_new_name)
-                        if metadata_changed:
-                            stats['canonical_attachment_names'] += 1
-
-                        new_drive_path = enforce_drive_canonical_name(file_path, desired_new_name, file_hash, stats)
-                        if new_drive_path != file_path:
-                            existing_filenames.pop(norm_local, None)
-                            existing_filenames_aggressive.pop(norm_local_aggressive, None)
-                            file_path = new_drive_path
-                            file_name = os.path.basename(file_path)
-                            norm_local = normalize_filename(file_name)
-                            norm_local_aggressive = normalize_aggressive(file_name)
-                        info['original'] = file_name
-
-                    if drive_collection_key:
-                        target_key_for_collection = parent_key or new_key
-                        collection_changed = update_item_collection_membership(
-                            zot,
-                            target_key_for_collection,
-                            drive_collection_key,
-                        ) or collection_changed
-                    existing_filenames[norm_local] = info
-                    existing_filenames_aggressive[norm_local_aggressive] = info
-                    if local_path and os.path.exists(local_path):
-                        register_local_hash(hash_index, key_to_path, new_key, local_path, info)
-                    if parent_key:
-                        logging.info(
-                            "[CASO 4] '%s' anexado ao item existente parent=%s com sucesso (key=%s).",
-                            file_name,
-                            parent_key,
-                            new_key,
-                        )
-                    else:
-                        logging.info("[CASO 4] '%s' adicionado como top-level com sucesso (key=%s).", file_name, new_key)
-                    handled = True
-
-                if unchanged_items:
-                    existing_key = unchanged_items[0].get("key")
-                    if not existing_key:
-                        existing_filenames.pop(norm_local, None)
-                        existing_filenames_aggressive.pop(norm_local_aggressive, None)
-                        stats['errors'] += 1
-                        logging.error("[ERRO] Chave ausente para '%s' (unchanged). Resposta: %s", file_name, response)
-                    else:
-                        stats['skipped'] += 1
-                        collection_changed = False
-                        if drive_collection_key:
-                            target_key_for_collection = parent_key or existing_key
-                            collection_changed = update_item_collection_membership(
-                                zot,
-                                target_key_for_collection,
-                                drive_collection_key,
-                            ) or collection_changed
-                        info = {
-                            'original': file_name,
-                            'key': existing_key,
-                            'dateModified': None,
-                            'relative_path': relative_drive_path,
-                            'collection_key': drive_collection_key,
-                        }
-                        existing_filenames[norm_local] = info
-                        existing_filenames_aggressive[norm_local_aggressive] = info
-                        copy_outcome = copy_to_local_storage(file_path, existing_key, file_hash)
-                        if copy_outcome == "copied":
-                            stats['local_copies'] += 1
-                        local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, existing_key))
-                        if local_path and os.path.exists(local_path):
-                            register_local_hash(hash_index, key_to_path, existing_key, local_path, info)
-                        logging.info("[CASO 4] '%s' já existia no Zotero (unchanged, key=%s).", file_name, existing_key)
-                    handled = True
-
-                if not handled:
+                desktop_result = import_attachment_via_desktop(
+                    file_path,
+                    drive_collection_key,
+                    parent_key=parent_key,
+                    auto_recognize=not parent_key,
+                )
+                if not desktop_result:
                     existing_filenames.pop(norm_local, None)
                     existing_filenames_aggressive.pop(norm_local_aggressive, None)
                     stats['errors'] += 1
-                    logging.error("[ERRO] Falha ao adicionar '%s'. Falhas: %s", file_name, failure_items or response)
+                    logging.error("[ERRO] Falha ao importar '%s' via Zotero Desktop/WebDAV.", file_name)
+                    continue
+
+                new_key = desktop_result.get("attachmentKey")
+                if not new_key:
+                    existing_filenames.pop(norm_local, None)
+                    existing_filenames_aggressive.pop(norm_local_aggressive, None)
+                    stats['errors'] += 1
+                    logging.error("[ERRO] Chave não retornada pela importação desktop para '%s'. Resposta: %s", file_name, desktop_result)
+                    continue
+
+                stats['added'] += 1
+                if parent_key:
+                    stats['attached_to_existing_parent'] += 1
+
+                final_name = desktop_result.get("attachmentFilename") or file_name
+                final_parent_key = desktop_result.get("parentKey") or parent_key or ""
+                info = {
+                    'original': final_name,
+                    'key': new_key,
+                    'dateModified': None,
+                    'relative_path': relative_drive_path,
+                    'collection_key': drive_collection_key,
+                }
+
+                if final_name != file_name:
+                    new_drive_path = enforce_drive_canonical_name(file_path, final_name, file_hash, stats)
+                    if new_drive_path != file_path:
+                        existing_filenames.pop(norm_local, None)
+                        existing_filenames_aggressive.pop(norm_local_aggressive, None)
+                        file_path = new_drive_path
+                        file_name = os.path.basename(file_path)
+                        norm_local = normalize_filename(file_name)
+                        norm_local_aggressive = normalize_aggressive(file_name)
+                    info['original'] = file_name
+
+                existing_filenames[norm_local] = info
+                existing_filenames_aggressive[norm_local_aggressive] = info
+                local_path = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, new_key))
+                if local_path and os.path.exists(local_path):
+                    register_local_hash(hash_index, key_to_path, new_key, local_path, info)
+
+                if parent_key and drive_collection_key and final_parent_key == parent_key:
+                    update_item_collection_membership(
+                        zot,
+                        parent_key,
+                        drive_collection_key,
+                    )
+
+                if final_parent_key and not parent_key:
+                    logging.info(
+                        "[CASO 4] '%s' importado via Zotero Desktop com parent=%s (attachment=%s).",
+                        file_name,
+                        final_parent_key,
+                        new_key,
+                    )
+                elif parent_key:
+                    logging.info(
+                        "[CASO 4] '%s' anexado ao item existente parent=%s com sucesso via desktop (attachment=%s).",
+                        file_name,
+                        parent_key,
+                        new_key,
+                    )
+                else:
+                    logging.info("[CASO 4] '%s' importado como top-level via desktop (attachment=%s).", file_name, new_key)
 
             except Exception as e:
                 existing_filenames.pop(norm_local, None)
                 existing_filenames_aggressive.pop(norm_local_aggressive, None)
                 stats['errors'] += 1
-                logging.error("[ERRO] Exceção ao adicionar '%s': %s", file_name, e)
-                cleanup_failed_attachment_upload(zot, file_path)
+                logging.error("[ERRO] Exceção ao importar '%s' via Zotero Desktop: %s", file_name, e)
 
 
 
