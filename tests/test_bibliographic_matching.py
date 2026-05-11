@@ -630,14 +630,14 @@ class BibliographicMatchingTests(unittest.TestCase):
         self.assertIn("snapshot HTML", reason)
 
     def test_desktop_recognizer_manifest_declares_update_url(self):
-        manifest = json.loads(Path("zotero_desktop_recognizer/manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads(Path("zotero_sync_recognizer/manifest.json").read_text(encoding="utf-8"))
         zotero_app = manifest["applications"]["zotero"]
         self.assertEqual(zotero_app["id"], "zotero-sync-recognizer@example.com")
         self.assertTrue(zotero_app["update_url"].startswith("https://"))
         self.assertEqual(zotero_app["strict_max_version"], "9.*")
 
     def test_desktop_recognizer_bootstrap_has_fallback_parent_flow(self):
-        bootstrap = Path("zotero_desktop_recognizer/bootstrap.js").read_text(encoding="utf-8")
+        bootstrap = Path("zotero_sync_recognizer/bootstrap.js").read_text(encoding="utf-8")
         self.assertIn("createFallbackParent", bootstrap)
         self.assertIn("fallbackParents", bootstrap)
 

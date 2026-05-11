@@ -236,7 +236,7 @@ ZOTERO_DESKTOP_CONNECTOR_URL = os.environ.get(
     "http://127.0.0.1:23119",
 ).rstrip("/")
 ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_ID = "zotero-sync-recognizer@example.com"
-ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_DIR = SCRIPT_DIR / "zotero_desktop_recognizer"
+ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_DIR = SCRIPT_DIR / "zotero_sync_recognizer"
 ZOTERO_DESKTOP_RECOGNIZER_PING_URL = (
     f"{ZOTERO_DESKTOP_CONNECTOR_URL}/zoteroSyncRecognize/ping"
 )
