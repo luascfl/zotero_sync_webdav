@@ -655,7 +655,7 @@ AUTHOR_CREATOR_TYPES = {
 
 
 COPY_PREFIX_RE = re.compile(r'^\s*(?:c[oó]pia\s+de|copy\s+of)\s+', re.IGNORECASE)
-COPY_NUMBER_SUFFIX_RE = re.compile(r'(?:\s*\(\d+\)|\s+1)\s*$')
+COPY_NUMBER_SUFFIX_RE = re.compile(r'(?:\s*\(\d+\))\s*$')
 
 
 def canonical_duplicate_stem(stem: str) -> str:
@@ -670,7 +670,7 @@ def canonical_duplicate_stem(stem: str) -> str:
 
 
 def canonical_duplicate_filename(filename: str) -> str:
-    """Retorna o nome sem marcadores como 'Cópia de', '(1)' ou sufixo ' 1'."""
+    """Retorna o nome sem marcadores como 'Cópia de' ou '(1)'."""
     basename = os.path.basename(filename or "")
     if not basename:
         return ""
@@ -1247,6 +1247,45 @@ def collect_all_pdfs(directory: str, stats: dict) -> List[str]:
     logging.info("[SCAN] PDFs encontrados: %d", len(entries))
 
     return [path for _, path in entries]
+
+
+def preprocess_drive_copy_variants(file_paths: List[str], stats: dict) -> List[str]:
+    """Normaliza nomes com marcador de cópia antes do loop principal do sync."""
+    stats.setdefault('preprocessed_drive_copy_variants', 0)
+    stats.setdefault('blocked_drive_copy_variants', 0)
+    seen_paths: set[str] = set()
+    normalized_paths: list[str] = []
+    for file_path in file_paths:
+        if not file_path or not os.path.exists(file_path):
+            continue
+        current_path = file_path
+        file_name = os.path.basename(file_path)
+        if is_copy_variant_filename(file_name):
+            desired_name = canonical_duplicate_filename(file_name)
+            desired_path = os.path.join(os.path.dirname(file_path), desired_name)
+            new_path = relocate_drive_file(file_path, desired_path, None, stats)
+            if new_path != file_path:
+                stats['preprocessed_drive_copy_variants'] += 1
+                current_path = new_path
+                logging.info(
+                    "[PRE-COPY] Marcador de cópia consolidado antes do sync: '%s' -> '%s'.",
+                    file_path,
+                    new_path,
+                )
+            elif is_copy_variant_filename(os.path.basename(new_path)):
+                stats['blocked_drive_copy_variants'] += 1
+                logging.warning(
+                    "[PRE-COPY] Não foi possível consolidar o marcador de cópia de '%s'.",
+                    file_path,
+                )
+        if not os.path.exists(current_path):
+            continue
+        abs_path = os.path.abspath(current_path)
+        if abs_path in seen_paths:
+            continue
+        seen_paths.add(abs_path)
+        normalized_paths.append(current_path)
+    return normalized_paths
 
 
 def collect_all_attachments(
@@ -4229,6 +4268,8 @@ def run_sync_mode():
         'obsidian_pdfs_moved_to_drive': 0,
         'obsidian_pdfs_blocked': 0,
         'obsidian_pdfs_deduped': 0,
+        'preprocessed_drive_copy_variants': 0,
+        'blocked_drive_copy_variants': 0,
     }
     tie_conflicts: list[dict[str, str]] = []
 
@@ -4375,11 +4416,16 @@ def run_sync_mode():
     try:
         files_to_process = collect_all_pdfs(TARGET_FOLDER, stats)
 
+        files_to_process = preprocess_drive_copy_variants(files_to_process, stats)
         if not files_to_process:
             print("Nenhum arquivo PDF encontrado na pasta.")
             finalize_execution(stats)
             return
 
+        if not files_to_process:
+            print("Nenhum arquivo PDF restante após a consolidação dos nomes de cópia.")
+            finalize_execution(stats)
+            return
         print(f"Encontrados {stats['folder_total_pdfs']} PDFs. Processando todos.")
 
         if not probe_pdf_content_read(files_to_process[0]):
@@ -4930,6 +4976,8 @@ def run_sync_mode():
 │ 📝 Renomes storage: {stats['renamed_local']:<27} │
 │ Nomes canônicos Zotero: {stats['canonical_attachment_names']:<23} │
 │ Standalone normalizados: {stats['normalized_standalone_attachments']:<22} │
+│ Cópias pré-sync consolidadas: {stats['preprocessed_drive_copy_variants']:<14} │
+│ Cópias pré-sync bloqueadas: {stats['blocked_drive_copy_variants']:<16} │
 │ Reconhecimento desktop: {stats['desktop_recognition_processed']}/{stats['desktop_recognition_requested']:<23} │
 │ Itens pai fallback: {stats['desktop_parent_fallbacks']:<24} │
 │ Pastas coleção drive: {stats['created_drive_collection_dirs']:<22} │

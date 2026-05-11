@@ -163,6 +163,11 @@ class BibliographicMatchingTests(unittest.TestCase):
 
         self.assertEqual(preferred, "Arquivo X.pdf")
 
+    def test_plain_trailing_number_is_not_treated_as_copy_variant(self):
+        self.assertFalse(zsync.is_copy_variant_filename("Slides 1.pdf"))
+        self.assertEqual(zsync.canonical_duplicate_filename("Slides 1.pdf"), "Slides 1.pdf")
+
+
     def test_canonical_parent_pdf_filename_uses_title_author_year(self):
         item = make_item(
             "PARENT1",
@@ -372,6 +377,43 @@ class BibliographicMatchingTests(unittest.TestCase):
             self.assertTrue((folder / "Arquivo X.pdf").exists())
             self.assertFalse(duplicate.exists())
             self.assertEqual(stats["renamed_webdav"], 1)
+
+    def test_preprocess_drive_copy_variants_renames_copy_before_sync(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            duplicate = folder / "Cópia de Arquivo X.pdf"
+            duplicate.write_bytes(b"same pdf content")
+            stats = {
+                "renamed_webdav": 0,
+                "pruned_drive_duplicates": 0,
+                "preprocessed_drive_copy_variants": 0,
+                "blocked_drive_copy_variants": 0,
+            }
+            result = zsync.preprocess_drive_copy_variants([str(duplicate)], stats)
+
+            self.assertEqual(result, [str(folder / "Arquivo X.pdf")])
+            self.assertTrue((folder / "Arquivo X.pdf").exists())
+            self.assertFalse(duplicate.exists())
+            self.assertEqual(stats["preprocessed_drive_copy_variants"], 1)
+
+    def test_preprocess_drive_copy_variants_blocks_when_collision_differs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            canonical = folder / "Arquivo X.pdf"
+            duplicate = folder / "Cópia de Arquivo X.pdf"
+            canonical.write_bytes(b"a")
+            duplicate.write_bytes(b"b")
+            stats = {
+                "renamed_webdav": 0,
+                "pruned_drive_duplicates": 0,
+                "preprocessed_drive_copy_variants": 0,
+                "blocked_drive_copy_variants": 0,
+            }
+            result = zsync.preprocess_drive_copy_variants([str(duplicate)], stats)
+
+            self.assertEqual(result, [str(duplicate)])
+            self.assertTrue(duplicate.exists())
+            self.assertEqual(stats["blocked_drive_copy_variants"], 1)
 
     def test_bibliographic_duplicate_groups_use_doi_before_title(self):
         index = zsync.build_bibliographic_parent_index([
