@@ -239,6 +239,62 @@ class BibliographicMatchingTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             zsync.parse_path_map_entries(["sem-separador"])
 
+    def test_build_collection_path_model_creates_hierarchy(self):
+        collections = [
+            {"key": "ROOT", "data": {"name": "UNEB Psicologia 2025.2"}},
+            {"key": "CHILD", "data": {"name": "Psicologia Social", "parentCollection": "ROOT"}},
+        ]
+        by_key, children, path_to_key = zsync.build_collection_path_model(collections)
+        self.assertEqual(by_key["ROOT"]["relative_path"], "UNEB Psicologia 2025.2")
+        self.assertEqual(by_key["CHILD"]["relative_path"], "UNEB Psicologia 2025.2/Psicologia Social")
+        self.assertEqual(children[None], ["ROOT"])
+        self.assertEqual(children["ROOT"], ["CHILD"])
+        self.assertEqual(path_to_key["uneb psicologia 2025.2/psicologia social"], "CHILD")
+
+    def test_attachment_target_location_uses_parent_collection(self):
+        parent = make_item("PARENT1", "Título", creators=[{"creatorType": "author", "lastName": "Autor"}])
+        parent["data"]["collections"] = ["COL1"]
+        attachment = make_attachment("ATT1", "Arquivo.pdf", parent_key="PARENT1")
+        collection_by_key = {
+            "COL1": {"relative_path": "UNEB Psicologia 2025.2", "relative_parts": ["UNEB Psicologia 2025.2"]}
+        }
+        location = zsync.attachment_target_location(
+            attachment,
+            "Arquivo.pdf",
+            {"PARENT1": parent},
+            collection_by_key,
+        )
+        self.assertEqual(location["collection_key"], "COL1")
+        self.assertEqual(location["relative_path"], "UNEB Psicologia 2025.2/Arquivo.pdf")
+
+    def test_infer_collection_key_from_relative_path_uses_deepest_match(self):
+        path_to_key = {
+            "uneb psicologia 2025.2": "ROOT",
+            "uneb psicologia 2025.2/psicologia social": "CHILD",
+        }
+        key = zsync.infer_collection_key_from_relative_path(
+            "UNEB Psicologia 2025.2/Psicologia Social/Artigo.pdf",
+            path_to_key,
+        )
+        self.assertEqual(key, "CHILD")
+
+    def test_collect_obsidian_ingest_candidates_filters_by_collection_dirs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / ".obsidian").mkdir()
+            tracked_dir = root / "UNEB Psicologia 2025.2"
+            tracked_dir.mkdir()
+            (tracked_dir / "artigo.pdf").write_bytes(b"pdf")
+            unrelated_dir = root / "Outros"
+            unrelated_dir.mkdir()
+            (unrelated_dir / "fora.pdf").write_bytes(b"pdf")
+            candidates = zsync.collect_obsidian_ingest_candidates(
+                root,
+                {"uneb psicologia 2025.2": "COL1"},
+            )
+            self.assertEqual(len(candidates), 1)
+            self.assertEqual(candidates[0]["collection_key"], "COL1")
+
     def test_hash_match_selection_prefers_metadata_name_matching_drive(self):
         parent_a = make_item(
             "PARENTA",

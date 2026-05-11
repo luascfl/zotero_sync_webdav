@@ -1204,25 +1204,24 @@ def merge_duplicate_metadata_into_keeper(
 
 
 def collect_all_pdfs(directory: str, stats: dict) -> List[str]:
-    """Retorna todos os PDFs da pasta, ordenados do mais recente ao mais antigo."""
-    logging.info("[SCAN] Iniciando varredura de PDFs em %s", directory)
+    """Retorna todos os PDFs da pasta, incluindo subpastas, ordenados do mais recente ao mais antigo."""
+    logging.info("[SCAN] Iniciando varredura recursiva de PDFs em %s", directory)
 
     entries: List[Tuple[float, str]] = []
 
     try:
-        with os.scandir(directory) as it:
-            for entry in it:
-                if not entry.is_file():
+        for root, dirnames, filenames in os.walk(directory):
+            dirnames[:] = [name for name in dirnames if name not in {'.git', '.obsidian', '__pycache__'}]
+            for name in filenames:
+                if not name.lower().endswith('.pdf'):
                     continue
-                if not entry.name.lower().endswith('.pdf'):
-                    continue
+                file_path = os.path.join(root, name)
                 try:
-                    mtime = entry.stat().st_mtime
+                    mtime = os.path.getmtime(file_path)
                 except OSError as exc:
-                    logging.warning("[SCAN] Não foi possível ler mtime de '%s': %s", entry.path, exc)
+                    logging.warning("[SCAN] Não foi possível ler mtime de '%s': %s", file_path, exc)
                     continue
-                entries.append((mtime, entry.path))
-
+                entries.append((mtime, file_path))
     except FileNotFoundError:
         logging.error("A pasta alvo não foi encontrada: %s", directory)
         return []
@@ -1969,6 +1968,48 @@ def delete_redundant_webdav_duplicate(
         return False
 
 
+
+def relocate_drive_file(
+    current_path: str,
+    desired_path: str,
+    file_hash: str | None,
+    stats: dict,
+) -> str:
+    """Move ou renomeia arquivo no drive criando subpastas quando necessário."""
+    if not current_path or not desired_path:
+        return current_path
+    current_abs = os.path.abspath(current_path)
+    desired_abs = os.path.abspath(desired_path)
+    if current_abs == desired_abs:
+        return current_path
+
+    try:
+        os.makedirs(os.path.dirname(desired_abs), exist_ok=True)
+    except OSError as exc:
+        logging.warning(
+            "[RENOMEIO] Não foi possível criar pasta destino '%s': %s",
+            os.path.dirname(desired_abs),
+            exc,
+        )
+        return current_path
+
+    if os.path.exists(desired_abs):
+        if delete_redundant_webdav_duplicate(current_abs, desired_abs, canonical_hash=file_hash):
+            stats['pruned_drive_duplicates'] += 1
+            return desired_abs
+        return current_path
+
+    try:
+        os.rename(current_abs, desired_abs)
+        rename_cache_entry(HASH_CACHE, current_abs, desired_abs)
+        stats['renamed_webdav'] += 1
+        logging.info("[RENOMEIO] Drive realocado: '%s' -> '%s'.", current_abs, desired_abs)
+        return desired_abs
+    except OSError as exc:
+        logging.warning("[RENOMEIO] Falha ao mover '%s' para '%s': %s", current_abs, desired_abs, exc)
+        return current_path
+
+
 def compute_sha256(
     path: str,
     cache: Dict[str, dict] | None = None,
@@ -2145,22 +2186,8 @@ def enforce_drive_canonical_name(
     """Renomeia ou remove uma cópia redundante no drive preservando o nome canônico."""
     if not file_path or not desired_name:
         return file_path
-
     dest_path = os.path.join(os.path.dirname(file_path), desired_name)
-    if dest_path == file_path:
-        return file_path
-
-    if os.path.exists(dest_path):
-        if delete_redundant_webdav_duplicate(file_path, dest_path, canonical_hash=file_hash):
-            stats['pruned_drive_duplicates'] += 1
-            return dest_path
-        return file_path
-
-    new_path = rename_webdav_file(file_path, desired_name)
-    if new_path != file_path:
-        stats['renamed_webdav'] += 1
-        return new_path
-    return file_path
+    return relocate_drive_file(file_path, dest_path, file_hash, stats)
 
 
 
@@ -2851,21 +2878,30 @@ def download_zotero_attachment_to_local(
     return dest_file
 
 
-def build_drive_pdf_index(directory: str, stats: dict | None = None) -> tuple[dict, dict, dict]:
-    """Indexa PDFs atuais do drive por nome normalizado e hash."""
+def build_drive_pdf_index(directory: str, stats: dict | None = None) -> tuple[dict, dict, dict, dict, dict]:
+    """Indexa PDFs atuais do drive por nome, caminho relativo e hash."""
     name_index: dict[str, str] = {}
     aggressive_index: dict[str, str] = {}
+    path_index: dict[str, str] = {}
+    path_aggressive_index: dict[str, str] = {}
     hash_index: dict[str, list[dict]] = {}
 
     temp_stats = {'folder_total_pdfs': 0, 'folder_checked_pdfs': 0}
     for path in collect_all_pdfs(directory, temp_stats):
         filename = os.path.basename(path)
+        relative_path = relpath_from_root(directory, path)
         norm = normalize_filename(filename)
         norm_aggressive = normalize_aggressive(filename)
+        rel_norm = normalize_relative_path_key(relative_path)
+        rel_agg = normalize_relative_path_aggressive_key(relative_path)
         if norm and norm not in name_index:
             name_index[norm] = path
         if norm_aggressive and norm_aggressive not in aggressive_index:
             aggressive_index[norm_aggressive] = path
+        if rel_norm and rel_norm not in path_index:
+            path_index[rel_norm] = path
+        if rel_agg and rel_agg not in path_aggressive_index:
+            path_aggressive_index[rel_agg] = path
 
         file_hash = compute_sha256(path)
         if not file_hash:
@@ -2881,29 +2917,59 @@ def build_drive_pdf_index(directory: str, stats: dict | None = None) -> tuple[di
         hash_index.setdefault(file_hash, []).append({
             'path': path,
             'filename': filename,
+            'relative_path': relative_path,
             'mtime': mtime,
         })
 
     logging.info(
-        "[ZOT->DRIVE] Índice final do drive: %d nomes | %d hashes únicos.",
+        "[ZOT->DRIVE] Índice final do drive: %d nomes | %d caminhos | %d hashes únicos.",
         len(name_index),
+        len(path_index),
         len(hash_index),
     )
-    return name_index, aggressive_index, hash_index
+    return name_index, aggressive_index, path_index, path_aggressive_index, hash_index
+
+
+def build_drive_name_path_indexes(directory: str) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+    """Indexa o drive por nome e caminho relativo sem calcular hash."""
+    name_index: dict[str, str] = {}
+    aggressive_index: dict[str, str] = {}
+    path_index: dict[str, str] = {}
+    path_aggressive_index: dict[str, str] = {}
+    temp_stats = {'folder_total_pdfs': 0, 'folder_checked_pdfs': 0}
+    for path in collect_all_pdfs(directory, temp_stats):
+        filename = os.path.basename(path)
+        relative_path = relpath_from_root(directory, path)
+        norm = normalize_filename(filename)
+        norm_aggressive = normalize_aggressive(filename)
+        rel_norm = normalize_relative_path_key(relative_path)
+        rel_agg = normalize_relative_path_aggressive_key(relative_path)
+        if norm and norm not in name_index:
+            name_index[norm] = path
+        if norm_aggressive and norm_aggressive not in aggressive_index:
+            aggressive_index[norm_aggressive] = path
+        if rel_norm and rel_norm not in path_index:
+            path_index[rel_norm] = path
+        if rel_agg and rel_agg not in path_aggressive_index:
+            path_aggressive_index[rel_agg] = path
+    return name_index, aggressive_index, path_index, path_aggressive_index
 
 
 def materialize_zotero_attachments_to_drive(
     zot: zotero.Zotero,
     attachments: List[dict],
     parent_items_by_key: dict[str, dict],
+    collection_by_key: dict[str, dict],
     drive_name_index: dict,
     drive_aggressive_index: dict,
+    drive_path_index: dict,
+    drive_path_aggressive_index: dict,
     drive_hash_index: dict,
     key_to_path: Dict[str, str],
     stats: dict,
     tie_conflicts: list[dict[str, str]],
     ) -> None:
-    """Materializa no drive PDFs conhecidos pelo Zotero que não existem no drive."""
+    """Materializa no drive PDFs conhecidos pelo Zotero respeitando caminhos de coleção."""
     seen_keys: set[str] = set()
     protected_canonical_names: set[str] = set()
     for attachment in attachments:
@@ -2932,11 +2998,21 @@ def materialize_zotero_attachments_to_drive(
         if metadata_filename:
             filename = metadata_filename
 
-        norm = normalize_filename(filename)
-        norm_aggressive = normalize_aggressive(filename)
-        if (norm and norm in drive_name_index) or (norm_aggressive and norm_aggressive in drive_aggressive_index):
+        location = attachment_target_location(
+            item,
+            filename,
+            parent_items_by_key,
+            collection_by_key,
+        )
+        desired_relpath = location["relative_path"]
+        desired_drive_path = os.path.join(TARGET_FOLDER, *desired_relpath.split("/"))
+        rel_norm = normalize_relative_path_key(desired_relpath)
+        rel_aggressive = normalize_relative_path_aggressive_key(desired_relpath)
+        if (rel_norm and rel_norm in drive_path_index) or (rel_aggressive and rel_aggressive in drive_path_aggressive_index):
             continue
 
+        norm = normalize_filename(filename)
+        norm_aggressive = normalize_aggressive(filename)
         local_path = key_to_path.get(key) or get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, key))
         if not local_path or not os.path.exists(local_path):
             local_path = download_zotero_attachment_to_local(zot, item, filename)
@@ -2964,10 +3040,11 @@ def materialize_zotero_attachments_to_drive(
             drive_path = drive_entry['path']
             drive_name = drive_entry['filename']
             drive_mtime = drive_entry.get('mtime', 0.0)
+            drive_relative_path = drive_entry.get('relative_path') or relpath_from_root(TARGET_FOLDER, drive_path)
             zotero_date_modified = parse_zotero_date(data.get('dateModified', ''))
             zotero_mtime = zotero_date_modified.timestamp() if zotero_date_modified else os.path.getmtime(local_path)
 
-            if drive_name == filename:
+            if drive_name == filename and drive_relative_path == desired_relpath:
                 continue
             drive_norm = normalize_filename(drive_name)
             if (
@@ -2975,7 +3052,7 @@ def materialize_zotero_attachments_to_drive(
                 and drive_norm in protected_canonical_names
                 and drive_norm != normalize_filename(metadata_filename)
             ):
-                dest_path = os.path.join(TARGET_FOLDER, metadata_filename)
+                dest_path = desired_drive_path
                 if os.path.exists(dest_path):
                     dest_hash = compute_sha256(dest_path)
                     if dest_hash and dest_hash == local_hash:
@@ -3099,7 +3176,7 @@ def materialize_zotero_attachments_to_drive(
                 logging.warning("[ZOT->DRIVE] Empate de mtime entre drive e Zotero para key=%s.", key)
             continue
 
-        dest_path = os.path.join(TARGET_FOLDER, filename)
+        dest_path = desired_drive_path
         if os.path.exists(dest_path):
             dest_hash = compute_sha256(dest_path)
             if dest_hash and dest_hash == local_hash:
@@ -3118,9 +3195,14 @@ def materialize_zotero_attachments_to_drive(
             set_cached_hash(dest_path, local_hash, HASH_CACHE)
             drive_name_index[norm] = dest_path
             drive_aggressive_index[norm_aggressive] = dest_path
+            if rel_norm:
+                drive_path_index[rel_norm] = dest_path
+            if rel_aggressive:
+                drive_path_aggressive_index[rel_aggressive] = dest_path
             drive_hash_index.setdefault(local_hash, []).append({
                 'path': dest_path,
                 'filename': filename,
+                'relative_path': desired_relpath,
                 'mtime': os.path.getmtime(dest_path),
             })
             stats['materialized_drive'] += 1
@@ -3128,6 +3210,66 @@ def materialize_zotero_attachments_to_drive(
         except Exception as exc:
             stats['errors'] += 1
             logging.error("[ZOT->DRIVE] Falha ao materializar anexo %s em '%s': %s", key, dest_path, exc)
+
+
+def reconcile_drive_collection_paths(
+    attachments: List[dict],
+    parent_items_by_key: dict[str, dict],
+    collection_by_key: dict[str, dict],
+    drive_name_index: dict[str, str],
+    drive_aggressive_index: dict[str, str],
+    drive_path_index: dict[str, str],
+    drive_path_aggressive_index: dict[str, str],
+    key_to_path: Dict[str, str],
+    stats: dict,
+) -> None:
+    """Move arquivos do drive para a subpasta da coleção esperada quando o Zotero já conhece a coleção."""
+    stats.setdefault('moved_drive_files_to_collection', 0)
+    for item in attachments:
+        data = item.get('data', {})
+        key = item.get('key') or data.get('key')
+        filename = get_filename_from_item(item)
+        if not key or not filename or not attachment_is_pdf(item):
+            continue
+        filename = os.path.basename(filename)
+        metadata_filename = canonical_parent_pdf_filename(parent_items_by_key.get(data.get('parentItem')))
+        if metadata_filename:
+            filename = metadata_filename
+        location = attachment_target_location(item, filename, parent_items_by_key, collection_by_key)
+        desired_relpath = location['relative_path']
+        rel_norm = normalize_relative_path_key(desired_relpath)
+        rel_aggressive = normalize_relative_path_aggressive_key(desired_relpath)
+        if (rel_norm and rel_norm in drive_path_index) or (rel_aggressive and rel_aggressive in drive_path_aggressive_index):
+            continue
+
+        local_path = key_to_path.get(key) or get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, key))
+        if not local_path or not os.path.exists(local_path):
+            continue
+        local_hash = compute_sha256(local_path)
+        if not local_hash:
+            continue
+
+        norm_name = normalize_filename(filename)
+        norm_name_aggressive = normalize_aggressive(filename)
+        candidate_path = (
+            drive_name_index.get(norm_name)
+            or drive_aggressive_index.get(norm_name_aggressive)
+        )
+        if not candidate_path or not os.path.exists(candidate_path):
+            continue
+        candidate_hash = compute_sha256(candidate_path)
+        if not candidate_hash or candidate_hash != local_hash:
+            continue
+
+        desired_drive_path = os.path.join(TARGET_FOLDER, *desired_relpath.split('/'))
+        new_path = relocate_drive_file(candidate_path, desired_drive_path, local_hash, stats)
+        if new_path == candidate_path:
+            continue
+        stats['moved_drive_files_to_collection'] += 1
+        if rel_norm:
+            drive_path_index[rel_norm] = new_path
+        if rel_aggressive:
+            drive_path_aggressive_index[rel_aggressive] = new_path
 
 
 DEFAULT_OBSIDIAN_SNAP_APP_DIR = Path.home() / "snap/obsidian/current/.config/obsidian"
@@ -3358,6 +3500,344 @@ def sanitize_obsidian_folder_name(name: str, fallback: str) -> str:
     return clean or fallback
 
 
+def normalize_relative_path_key(relative_path: str) -> str:
+    """Normaliza caminho relativo preservando separadores para índices path-aware."""
+    parts = [normalize_filename(part) for part in str(relative_path).replace("\\", "/").split("/") if part and part != "."]
+    return "/".join(part for part in parts if part)
+
+
+def normalize_relative_path_aggressive_key(relative_path: str) -> str:
+    """Normaliza caminho relativo agressivamente preservando separadores."""
+    parts = [normalize_aggressive(part) for part in str(relative_path).replace("\\", "/").split("/") if part and part != "."]
+    return "/".join(part for part in parts if part)
+
+
+def relpath_from_root(root: str | Path, path: str | Path) -> str:
+    """Calcula caminho relativo em formato posix."""
+    return os.path.relpath(os.path.abspath(path), os.path.abspath(root)).replace(os.sep, "/")
+
+
+def fetch_zotero_collections(zot: zotero.Zotero) -> List[dict]:
+    """Busca todas as coleções visíveis da biblioteca."""
+    return zot.everything(zot.collections())
+
+
+def build_collection_path_model(collections: List[dict]) -> tuple[dict[str, dict], dict[str | None, list[str]], dict[str, str]]:
+    """Monta o modelo de caminhos de coleção a partir da hierarquia do Zotero."""
+    by_key: dict[str, dict] = {}
+    children: dict[str | None, list[str]] = {}
+    for col in collections:
+        key = col.get("key")
+        data = col.get("data", {})
+        if not key:
+            continue
+        by_key[key] = {
+            "key": key,
+            "name": data.get("name", ""),
+            "parent": data.get("parentCollection") or None,
+            "relative_parts": [],
+            "relative_path": "",
+        }
+
+    for key, payload in by_key.items():
+        parent = payload["parent"]
+        if parent and parent not in by_key:
+            parent = None
+            payload["parent"] = None
+        children.setdefault(parent, []).append(key)
+
+    def assign(parent_key: str | None, parent_parts: list[str]) -> None:
+        sibling_keys = children.get(parent_key, [])
+        sibling_keys.sort(key=lambda k: (by_key[k]["name"] or "").casefold())
+        used_names: dict[str, int] = {}
+        for key in sibling_keys:
+            original_name = by_key[key]["name"]
+            fallback = f"collection-{key.lower()}"
+            safe_name = sanitize_obsidian_folder_name(original_name, fallback)
+            if safe_name in used_names:
+                used_names[safe_name] += 1
+                safe_name = f"{safe_name} ({used_names[safe_name]})"
+            else:
+                used_names[safe_name] = 1
+            rel_parts = [*parent_parts, safe_name]
+            by_key[key]["relative_parts"] = rel_parts
+            by_key[key]["relative_path"] = "/".join(rel_parts)
+            assign(key, rel_parts)
+
+    assign(None, [])
+    path_to_key = {
+        normalize_relative_path_key(payload["relative_path"]): key
+        for key, payload in by_key.items()
+        if payload["relative_path"]
+    }
+    return by_key, children, path_to_key
+
+
+def select_primary_collection_key(
+    collection_keys: List[str],
+    collection_by_key: dict[str, dict],
+    preferred_key: str | None = None,
+) -> str | None:
+    """Escolhe a coleção primária de forma estável."""
+    valid = [key for key in collection_keys if key in collection_by_key]
+    if preferred_key and preferred_key in valid:
+        return preferred_key
+    if not valid:
+        return None
+    return sorted(valid, key=lambda key: (collection_by_key[key]["relative_path"], key))[0]
+
+
+def item_collection_keys_from_context(
+    item: dict,
+    parent_items_by_key: dict[str, dict],
+) -> List[str]:
+    """Retorna coleções relevantes de um anexo, priorizando o pai bibliográfico."""
+    data = item.get("data", {})
+    parent_key = data.get("parentItem")
+    if parent_key and parent_key in parent_items_by_key:
+        parent_data = parent_items_by_key[parent_key].get("data", {})
+        return list(parent_data.get("collections") or [])
+    return list(data.get("collections") or [])
+
+
+def attachment_target_location(
+    item: dict,
+    filename: str,
+    parent_items_by_key: dict[str, dict],
+    collection_by_key: dict[str, dict],
+    preferred_collection_key: str | None = None,
+) -> dict:
+    """Calcula coleção primária e caminho relativo esperado para um anexo."""
+    collection_key = select_primary_collection_key(
+        item_collection_keys_from_context(item, parent_items_by_key),
+        collection_by_key,
+        preferred_key=preferred_collection_key,
+    )
+    if collection_key and collection_key in collection_by_key:
+        rel_dir = collection_by_key[collection_key]["relative_path"]
+        relative_path = f"{rel_dir}/{filename}" if rel_dir else filename
+    else:
+        relative_path = filename
+    return {
+        "collection_key": collection_key,
+        "relative_path": relative_path,
+    }
+
+
+def infer_collection_key_from_relative_path(
+    relative_path: str,
+    path_to_collection_key: dict[str, str],
+) -> str | None:
+    """Infere a coleção mais específica a partir do caminho relativo."""
+    normalized = normalize_relative_path_key(relative_path)
+    parts = [part for part in normalized.split("/") if part]
+    if len(parts) <= 1:
+        return None
+    for size in range(len(parts) - 1, 0, -1):
+        prefix = "/".join(parts[:size])
+        if prefix in path_to_collection_key:
+            return path_to_collection_key[prefix]
+    return None
+
+
+def ensure_collection_directories(
+    collection_by_key: dict[str, dict],
+    drive_root: str,
+    obsidian_root: Path,
+    stats: dict,
+) -> None:
+    """Garante a existência das pastas espelhadas de coleção no drive e no Obsidian."""
+    stats.setdefault("created_drive_collection_dirs", 0)
+    stats.setdefault("created_obsidian_collection_dirs", 0)
+    for payload in collection_by_key.values():
+        relative_path = payload.get("relative_path")
+        if not relative_path:
+            continue
+        drive_dir = os.path.join(drive_root, *relative_path.split("/"))
+        if not os.path.isdir(drive_dir):
+            os.makedirs(drive_dir, exist_ok=True)
+            stats["created_drive_collection_dirs"] += 1
+        obsidian_dir = obsidian_root / Path(relative_path)
+        if not obsidian_dir.exists():
+            obsidian_dir.mkdir(parents=True, exist_ok=True)
+            stats["created_obsidian_collection_dirs"] += 1
+
+
+def build_expected_attachment_path_indexes(
+    attachments: List[dict],
+    parent_items_by_key: dict[str, dict],
+    collection_by_key: dict[str, dict],
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Indexa caminhos esperados de anexos por relative_path."""
+    path_index: dict[str, dict] = {}
+    path_aggressive_index: dict[str, dict] = {}
+    for item in attachments:
+        data = item.get("data", {})
+        key = item.get("key") or data.get("key")
+        filename = get_filename_from_item(item)
+        if not key or not filename:
+            continue
+        filename = os.path.basename(filename)
+        location = attachment_target_location(
+            item,
+            filename,
+            parent_items_by_key,
+            collection_by_key,
+        )
+        info = {
+            "key": key,
+            "original": filename,
+            "dateModified": data.get("dateModified"),
+            "relative_path": location["relative_path"],
+            "collection_key": location["collection_key"],
+        }
+        rel_basic = normalize_relative_path_key(location["relative_path"])
+        rel_aggressive = normalize_relative_path_aggressive_key(location["relative_path"])
+        if rel_basic and rel_basic not in path_index:
+            path_index[rel_basic] = info
+        if rel_aggressive and rel_aggressive not in path_aggressive_index:
+            path_aggressive_index[rel_aggressive] = info
+    return path_index, path_aggressive_index
+
+
+def collect_obsidian_ingest_candidates(
+    obsidian_root: Path,
+    collection_path_to_key: dict[str, str],
+) -> List[dict]:
+    """Lista PDFs do Obsidian que vivem sob uma pasta mapeada de coleção."""
+    candidates: list[dict] = []
+    if not obsidian_root.exists():
+        return candidates
+    for root, dirnames, filenames in os.walk(obsidian_root):
+        dirnames[:] = [name for name in dirnames if name not in {'.obsidian', '.git', '__pycache__'}]
+        for name in filenames:
+            if not name.lower().endswith('.pdf'):
+                continue
+            source_path = os.path.join(root, name)
+            relative_path = relpath_from_root(obsidian_root, source_path)
+            collection_key = infer_collection_key_from_relative_path(relative_path, collection_path_to_key)
+            if not collection_key:
+                continue
+            try:
+                mtime = os.path.getmtime(source_path)
+            except OSError:
+                mtime = 0.0
+            candidates.append({
+                "path": source_path,
+                "filename": name,
+                "relative_path": relative_path,
+                "collection_key": collection_key,
+                "mtime": mtime,
+            })
+    candidates.sort(key=lambda entry: entry["mtime"], reverse=True)
+    return candidates
+
+
+def ingest_obsidian_pdfs_to_drive(
+    obsidian_root: Path,
+    drive_root: str,
+    collection_by_key: dict[str, dict],
+    collection_path_to_key: dict[str, str],
+    stats: dict,
+) -> None:
+    """Move PDFs novos do Obsidian para a pasta correspondente no drive do Zotero."""
+    stats.setdefault("obsidian_new_pdfs_detected", 0)
+    stats.setdefault("obsidian_pdfs_moved_to_drive", 0)
+    stats.setdefault("obsidian_pdfs_blocked", 0)
+    stats.setdefault("obsidian_pdfs_deduped", 0)
+
+    candidates = collect_obsidian_ingest_candidates(obsidian_root, collection_path_to_key)
+    stats["obsidian_new_pdfs_detected"] += len(candidates)
+    for entry in candidates:
+        collection_key = entry["collection_key"]
+        collection_info = collection_by_key.get(collection_key)
+        if not collection_info:
+            stats["obsidian_pdfs_blocked"] += 1
+            logging.warning("[OBSIDIAN->DRIVE] Coleção %s não encontrada para '%s'.", collection_key, entry["path"])
+            continue
+
+        dest_dir = os.path.join(drive_root, *collection_info["relative_parts"])
+        dest_path = os.path.join(dest_dir, entry["filename"])
+        os.makedirs(dest_dir, exist_ok=True)
+
+        source_hash = compute_sha256(entry["path"])
+        if not source_hash:
+            stats["obsidian_pdfs_blocked"] += 1
+            logging.warning("[OBSIDIAN->DRIVE] Não foi possível hashear '%s'.", entry["path"])
+            continue
+
+        if os.path.exists(dest_path):
+            dest_hash = compute_sha256(dest_path)
+            if dest_hash and dest_hash == source_hash:
+                try:
+                    os.remove(entry["path"])
+                    remove_cache_entry(HASH_CACHE, entry["path"])
+                    stats["obsidian_pdfs_deduped"] += 1
+                    logging.info(
+                        "[OBSIDIAN->DRIVE] PDF redundante removido do Obsidian após confirmar cópia no drive: '%s'.",
+                        entry["path"],
+                    )
+                except OSError as exc:
+                    stats["obsidian_pdfs_blocked"] += 1
+                    logging.warning("[OBSIDIAN->DRIVE] Falha ao remover redundante '%s': %s", entry["path"], exc)
+                continue
+
+            stats["obsidian_pdfs_blocked"] += 1
+            logging.warning(
+                "[OBSIDIAN->DRIVE] Colisão com conteúdo diferente ao mover '%s' para '%s'.",
+                entry["path"],
+                dest_path,
+            )
+            continue
+
+        try:
+            shutil.move(entry["path"], dest_path)
+            rename_cache_entry(HASH_CACHE, entry["path"], dest_path)
+            set_cached_hash(dest_path, source_hash, HASH_CACHE)
+            stats["obsidian_pdfs_moved_to_drive"] += 1
+            logging.info(
+                "[OBSIDIAN->DRIVE] PDF movido para o drive da coleção %s: '%s' -> '%s'.",
+                collection_key,
+                entry["path"],
+                dest_path,
+            )
+        except OSError as exc:
+            stats["obsidian_pdfs_blocked"] += 1
+            logging.warning(
+                "[OBSIDIAN->DRIVE] Falha ao mover '%s' para '%s': %s",
+                entry["path"],
+                dest_path,
+                exc,
+            )
+
+
+def update_item_collection_membership(
+    zot: zotero.Zotero,
+    item_key: str,
+    collection_key: str | None,
+    item: dict | None = None,
+) -> bool:
+    """Adiciona item a uma coleção se ainda não estiver nela."""
+    if not item_key or not collection_key:
+        return False
+    try:
+        current_item = item if item and item.get("data") else zot.item(item_key)
+        item_data = dict(current_item.get("data") or current_item)
+        collections = list(item_data.get("collections") or [])
+        if collection_key in collections:
+            return False
+        item_data["collections"] = sorted(set(collections + [collection_key]))
+        zot.update_item(item_data)
+        if item is not None:
+            item.setdefault("data", {})["collections"] = item_data["collections"]
+        logging.info("[COLLECTION] Item %s adicionado à coleção %s.", item_key, collection_key)
+        return True
+    except Exception as exc:
+        logging.warning("[COLLECTION] Falha ao adicionar item %s à coleção %s: %s", item_key, collection_key, exc)
+        return False
+
+
+
 def resolve_obsidian_mirror_target_root(target_root: str | None) -> Path:
     target_root_raw = (
         target_root
@@ -3372,29 +3852,12 @@ def mirror_zotero_collections_to_obsidian(
     target_root: Path,
     apply_changes: bool,
 ) -> dict:
-    collections = zot.everything(zot.collections())
+    collections = fetch_zotero_collections(zot)
     obsidian_log(f"Coleções encontradas: {len(collections)}")
     obsidian_log(f"Destino Obsidian: {target_root}")
     obsidian_log(f"Modo: {'APPLY' if apply_changes else 'DRY-RUN'}")
 
-    by_key: dict[str, dict] = {}
-    children: dict[str | None, list[str]] = {}
-    for col in collections:
-        key = col.get("key")
-        data = col.get("data", {})
-        if not key:
-            continue
-        by_key[key] = {
-            "key": key,
-            "name": data.get("name", ""),
-            "parent": data.get("parentCollection") or None,
-        }
-
-    for key, payload in by_key.items():
-        parent = payload["parent"]
-        if parent and parent not in by_key:
-            parent = None
-        children.setdefault(parent, []).append(key)
+    by_key, children, _ = build_collection_path_model(collections)
 
     created = 0
     existed = 0
@@ -3403,18 +3866,9 @@ def mirror_zotero_collections_to_obsidian(
     def mirror_subtree(parent_key: str | None, base_path: Path) -> None:
         nonlocal created, existed, collisions
         sibling_keys = children.get(parent_key, [])
-        sibling_keys.sort(key=lambda k: (by_key[k]["name"] or "").casefold())
-        used_names: dict[str, int] = {}
+        sibling_keys.sort(key=lambda k: (by_key[k]["relative_path"], k))
         for key in sibling_keys:
-            original_name = by_key[key]["name"]
-            fallback = f"collection-{key.lower()}"
-            safe_name = sanitize_obsidian_folder_name(original_name, fallback)
-            if safe_name in used_names:
-                used_names[safe_name] += 1
-                safe_name = f"{safe_name} ({used_names[safe_name]})"
-                collisions += 1
-            else:
-                used_names[safe_name] = 1
+            safe_name = by_key[key]["relative_parts"][-1]
             next_path = base_path / safe_name
             if next_path.exists():
                 existed += 1
@@ -3743,6 +4197,12 @@ def run_sync_mode():
         'desktop_recognition_processed': 0,
         'desktop_recognition_skipped': 0,
         'desktop_parent_fallbacks': 0,
+        'created_drive_collection_dirs': 0,
+        'created_obsidian_collection_dirs': 0,
+        'obsidian_new_pdfs_detected': 0,
+        'obsidian_pdfs_moved_to_drive': 0,
+        'obsidian_pdfs_blocked': 0,
+        'obsidian_pdfs_deduped': 0,
     }
     tie_conflicts: list[dict[str, str]] = []
 
@@ -3840,10 +4300,42 @@ def run_sync_mode():
         ) = collect_all_attachments(zot, stats)
         stats['zotero_unique_filenames'] = len(existing_filenames)
 
+    collections = fetch_zotero_collections(zot)
+    collection_by_key, collection_children, collection_path_to_key = build_collection_path_model(collections)
+    obsidian_root = resolve_obsidian_mirror_target_root(None)
+    ensure_collection_directories(collection_by_key, TARGET_FOLDER, obsidian_root, stats)
+
+    ingest_obsidian_pdfs_to_drive(
+        obsidian_root,
+        TARGET_FOLDER,
+        collection_by_key,
+        collection_path_to_key,
+        stats,
+    )
+
+    expected_path_index, expected_path_aggressive_index = build_expected_attachment_path_indexes(
+        all_attachments,
+        parent_items_by_key,
+        collection_by_key,
+    )
+
     attachment_items_by_key = build_item_by_key(all_attachments)
 
 
     hash_index, key_to_path = build_local_storage_index(existing_filenames)
+    drive_name_index_fast, drive_aggressive_index_fast, drive_path_index_fast, drive_path_aggressive_index_fast = build_drive_name_path_indexes(TARGET_FOLDER)
+    reconcile_drive_collection_paths(
+        all_attachments,
+        parent_items_by_key,
+        collection_by_key,
+        drive_name_index_fast,
+        drive_aggressive_index_fast,
+        drive_path_index_fast,
+        drive_path_aggressive_index_fast,
+        key_to_path,
+        stats,
+    )
+
 
     # 3. Processar arquivos da pasta montada no drive.
     #
@@ -3900,12 +4392,21 @@ def run_sync_mode():
         for index, file_path in enumerate(tqdm(files_to_process, desc="Verificando arquivos locais"), start=1):
             stats['processed'] += 1
             file_name = os.path.basename(file_path)
-            logging.info("[LOOP] Processando %d/%d: '%s'.", index, total_files_to_process, file_name)
+            relative_drive_path = relpath_from_root(TARGET_FOLDER, file_path)
+            drive_collection_key = infer_collection_key_from_relative_path(
+                relative_drive_path,
+                collection_path_to_key,
+            )
+            logging.info("[LOOP] Processando %d/%d: '%s'.", index, total_files_to_process, relative_drive_path)
             norm_local = normalize_filename(file_name)
             norm_local_aggressive = normalize_aggressive(file_name)
+            norm_rel = normalize_relative_path_key(relative_drive_path)
+            norm_rel_aggressive = normalize_relative_path_aggressive_key(relative_drive_path)
 
             nome_info = (
-                existing_filenames.get(norm_local)
+                expected_path_index.get(norm_rel)
+                or expected_path_aggressive_index.get(norm_rel_aggressive)
+                or existing_filenames.get(norm_local)
                 or existing_filenames_aggressive.get(norm_local_aggressive)
             )
             nome_encontrado = nome_info is not None and nome_info.get('key') != '__pending__'
@@ -3913,6 +4414,17 @@ def run_sync_mode():
             if nome_encontrado:
                 zotero_key = nome_info['key']
                 local_dir = os.path.join(LOCAL_COPY_DIR, zotero_key)
+                attachment_item = attachment_items_by_key.get(zotero_key)
+                expected_filename = os.path.basename(get_filename_from_item(attachment_item)) if attachment_item else file_name
+                desired_location = attachment_target_location(
+                    attachment_item or {'data': {'key': zotero_key}},
+                    expected_filename or file_name,
+                    parent_items_by_key,
+                    collection_by_key,
+                )
+                desired_relpath = nome_info.get('relative_path') or desired_location['relative_path']
+                desired_drive_path = os.path.join(TARGET_FOLDER, *desired_relpath.split('/'))
+                desired_collection_key = desired_location['collection_key']
                 local_file = get_latest_pdf_path(local_dir)
 
                 if local_file and os.path.exists(local_file):
@@ -3932,14 +4444,16 @@ def run_sync_mode():
 
                     if local_hash and webdav_hash and local_hash == webdav_hash:
                         # CASO 1: nome ok, conteúdo igual → já sincronizado
-                        logging.info("[CASO 1] '%s' já sincronizado (key=%s).", file_name, zotero_key)
+                        if relative_drive_path != desired_relpath:
+                            file_path = relocate_drive_file(file_path, desired_drive_path, webdav_hash, stats)
+                        logging.info("[CASO 1] '%s' já sincronizado (key=%s).", relative_drive_path, zotero_key)
                         stats['skipped'] += 1
                         stats['hash_matches'] += 1
                         continue
 
                     elif local_hash and webdav_hash and local_hash != webdav_hash:
                         # CASO 2: nome ok, conteúdo diferente → WebDAV tem versão mais nova
-                        logging.info("[CASO 2] '%s' atualizado no WebDAV. Atualizando storage local (key=%s).", file_name, zotero_key)
+                        logging.info("[CASO 2] '%s' atualizado no WebDAV. Atualizando storage local (key=%s).", relative_drive_path, zotero_key)
                         try:
                             shutil.copy2(file_path, local_file)
                             set_cached_hash(local_file, webdav_hash, HASH_CACHE)
@@ -3950,12 +4464,14 @@ def run_sync_mode():
                         except Exception as exc:
                             logging.warning("[CASO 2] Falha ao atualizar storage local de '%s': %s", file_name, exc)
                             stats['errors'] += 1
+                        if relative_drive_path != desired_relpath:
+                            file_path = relocate_drive_file(file_path, desired_drive_path, webdav_hash, stats)
                         stats['skipped'] += 1
                         continue
 
                 else:
                     # CASO 5: nome encontrado no Zotero mas sem cópia local
-                    logging.info("[CASO 5] '%s' existe no Zotero mas sem cópia local. Copiando (key=%s).", file_name, zotero_key)
+                    logging.info("[CASO 5] '%s' existe no Zotero mas sem cópia local. Copiando (key=%s).", relative_drive_path, zotero_key)
                     webdav_hash = compute_sha256(file_path)
                     if not webdav_hash:
                         stats['errors'] += 1
@@ -3970,6 +4486,8 @@ def run_sync_mode():
                         new_local = get_latest_pdf_path(local_dir)
                         if new_local:
                             register_local_hash(hash_index, key_to_path, zotero_key, new_local, nome_info)
+                    if relative_drive_path != desired_relpath:
+                        file_path = relocate_drive_file(file_path, desired_drive_path, webdav_hash, stats)
                     stats['skipped'] += 1
                     continue
 
@@ -4221,7 +4739,14 @@ def run_sync_mode():
                     stats['added'] += 1
                     if parent_key:
                         stats['attached_to_existing_parent'] += 1
-                    info = {'original': file_name, 'key': new_key, 'dateModified': None}
+                    collection_changed = False
+                    info = {
+                        'original': file_name,
+                        'key': new_key,
+                        'dateModified': None,
+                        'relative_path': relative_drive_path,
+                        'collection_key': drive_collection_key,
+                    }
                     copy_outcome = copy_to_local_storage(file_path, new_key, file_hash)
                     if copy_outcome == "copied":
                         stats['local_copies'] += 1
@@ -4261,6 +4786,13 @@ def run_sync_mode():
                             norm_local_aggressive = normalize_aggressive(file_name)
                         info['original'] = file_name
 
+                    if drive_collection_key:
+                        target_key_for_collection = parent_key or new_key
+                        collection_changed = update_item_collection_membership(
+                            zot,
+                            target_key_for_collection,
+                            drive_collection_key,
+                        ) or collection_changed
                     existing_filenames[norm_local] = info
                     existing_filenames_aggressive[norm_local_aggressive] = info
                     if local_path and os.path.exists(local_path):
@@ -4285,7 +4817,21 @@ def run_sync_mode():
                         logging.error("[ERRO] Chave ausente para '%s' (unchanged). Resposta: %s", file_name, response)
                     else:
                         stats['skipped'] += 1
-                        info = {'original': file_name, 'key': existing_key, 'dateModified': None}
+                        collection_changed = False
+                        if drive_collection_key:
+                            target_key_for_collection = parent_key or existing_key
+                            collection_changed = update_item_collection_membership(
+                                zot,
+                                target_key_for_collection,
+                                drive_collection_key,
+                            ) or collection_changed
+                        info = {
+                            'original': file_name,
+                            'key': existing_key,
+                            'dateModified': None,
+                            'relative_path': relative_drive_path,
+                            'collection_key': drive_collection_key,
+                        }
                         existing_filenames[norm_local] = info
                         existing_filenames_aggressive[norm_local_aggressive] = info
                         copy_outcome = copy_to_local_storage(file_path, existing_key, file_hash)
@@ -4321,19 +4867,38 @@ def run_sync_mode():
                 existing_filenames_aggressive,
             ) = collect_all_attachments(zot, stats)
             stats['zotero_unique_filenames'] = len(existing_filenames)
+            expected_path_index, expected_path_aggressive_index = build_expected_attachment_path_indexes(
+                all_attachments,
+                parent_items_by_key,
+                collection_by_key,
+            )
 
         logging.info("[ZOT->DRIVE] Iniciando reconciliação Zotero -> drive para anexos ausentes.")
-        drive_name_index, drive_aggressive_index, drive_hash_index = build_drive_pdf_index(TARGET_FOLDER, stats)
+        drive_name_index, drive_aggressive_index, drive_path_index, drive_path_aggressive_index, drive_hash_index = build_drive_pdf_index(TARGET_FOLDER, stats)
         materialize_zotero_attachments_to_drive(
             zot,
             all_attachments,
             parent_items_by_key,
+            collection_by_key,
             drive_name_index,
             drive_aggressive_index,
+            drive_path_index,
+            drive_path_aggressive_index,
             drive_hash_index,
             key_to_path,
             stats,
             tie_conflicts,
+        )
+        reconcile_drive_collection_paths(
+            all_attachments,
+            parent_items_by_key,
+            collection_by_key,
+            drive_name_index,
+            drive_aggressive_index,
+            drive_path_index,
+            drive_path_aggressive_index,
+            key_to_path,
+            stats,
         )
     except Exception as e:
         logging.error(f"Erro ao processar arquivos da pasta: {e}")
@@ -4387,6 +4952,13 @@ def run_sync_mode():
 │ Standalone normalizados: {stats['normalized_standalone_attachments']:<22} │
 │ Reconhecimento desktop: {stats['desktop_recognition_processed']}/{stats['desktop_recognition_requested']:<23} │
 │ Itens pai fallback: {stats['desktop_parent_fallbacks']:<24} │
+│ Pastas coleção drive: {stats['created_drive_collection_dirs']:<22} │
+│ Pastas coleção Obsidian: {stats['created_obsidian_collection_dirs']:<19} │
+│ PDFs novos no Obsidian: {stats['obsidian_new_pdfs_detected']:<21} │
+│ PDFs movidos ao drive: {stats['obsidian_pdfs_moved_to_drive']:<22} │
+│ PDFs bloqueados Obsidian: {stats['obsidian_pdfs_blocked']:<18} │
+│ PDFs deduplicados Obsidian: {stats['obsidian_pdfs_deduped']:<15} │
+│ Arquivos realocados à coleção: {stats['moved_drive_files_to_collection']:<14} │
 │ 🧹 Duplicados removidos: {stats['pruned_drive_duplicates']:<22} │
 │ ⬇️  Baixados do Zotero: {stats['downloaded_zotero']:<24} │
 │ 📤 Materializados no drive: {stats['materialized_drive']:<20} │
