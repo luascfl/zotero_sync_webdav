@@ -3281,15 +3281,14 @@ def reconcile_drive_collection_paths(
     attachments: List[dict],
     parent_items_by_key: dict[str, dict],
     collection_by_key: dict[str, dict],
+    collection_path_to_key: dict[str, str],
     drive_name_index: dict[str, str],
     drive_aggressive_index: dict[str, str],
-    drive_path_index: dict[str, str],
-    drive_path_aggressive_index: dict[str, str],
     key_to_path: Dict[str, str],
     stats: dict,
 ) -> None:
-    """Move arquivos do drive para a subpasta da coleção esperada quando o Zotero já conhece a coleção."""
-    stats.setdefault('moved_drive_files_to_collection', 0)
+    """Alinha a coleção do Zotero ao caminho real já existente no drive quando houver conteúdo."""
+    stats.setdefault('drive_authoritative_collection_updates', 0)
     for item in attachments:
         data = item.get('data', {})
         key = item.get('key') or data.get('key')
@@ -3300,12 +3299,7 @@ def reconcile_drive_collection_paths(
         metadata_filename = canonical_parent_pdf_filename(parent_items_by_key.get(data.get('parentItem')))
         if metadata_filename:
             filename = metadata_filename
-        location = attachment_target_location(item, filename, parent_items_by_key, collection_by_key)
-        desired_relpath = location['relative_path']
-        rel_norm = normalize_relative_path_key(desired_relpath)
-        rel_aggressive = normalize_relative_path_aggressive_key(desired_relpath)
-        if (rel_norm and rel_norm in drive_path_index) or (rel_aggressive and rel_aggressive in drive_path_aggressive_index):
-            continue
+        current_location = attachment_target_location(item, filename, parent_items_by_key, collection_by_key)
 
         local_path = key_to_path.get(key) or get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, key))
         if not local_path or not os.path.exists(local_path):
@@ -3326,15 +3320,24 @@ def reconcile_drive_collection_paths(
         if not candidate_hash or candidate_hash != local_hash:
             continue
 
-        desired_drive_path = os.path.join(TARGET_FOLDER, *desired_relpath.split('/'))
-        new_path = relocate_drive_file(candidate_path, desired_drive_path, local_hash, stats)
-        if new_path == candidate_path:
+        relative_drive_path = relpath_from_root(TARGET_FOLDER, candidate_path)
+        drive_collection_key = infer_collection_key_from_relative_path(
+            relative_drive_path,
+            collection_path_to_key,
+        )
+        if not drive_collection_key or drive_collection_key == current_location['collection_key']:
             continue
-        stats['moved_drive_files_to_collection'] += 1
-        if rel_norm:
-            drive_path_index[rel_norm] = new_path
-        if rel_aggressive:
-            drive_path_aggressive_index[rel_aggressive] = new_path
+
+        target_item_key = data.get('parentItem') or key
+        target_item = parent_items_by_key.get(data.get('parentItem')) if data.get('parentItem') else item
+        if sync_item_collections_to_drive_collection(
+            zot,
+            target_item_key,
+            drive_collection_key,
+            collection_by_key,
+            item=target_item,
+        ):
+            stats['drive_authoritative_collection_updates'] += 1
 
 
 DEFAULT_OBSIDIAN_SNAP_APP_DIR = Path.home() / "snap/obsidian/current/.config/obsidian"
@@ -3727,6 +3730,86 @@ def ensure_collection_directories(
             obsidian_dir.mkdir(parents=True, exist_ok=True)
             stats["created_obsidian_collection_dirs"] += 1
 
+
+
+def ensure_directory_exists(path: str | Path, stats: dict | None = None, counter_key: str | None = None) -> bool:
+    """Cria diretório somente quando necessário e atualiza contador opcional."""
+    path = str(path)
+    if os.path.isdir(path):
+        return False
+    os.makedirs(path, exist_ok=True)
+    if stats is not None and counter_key:
+        stats[counter_key] = stats.get(counter_key, 0) + 1
+    return True
+
+
+def remove_empty_directories(root: str | Path, stats: dict, counter_key: str) -> int:
+    """Remove diretórios vazios sob a raiz, preservando diretórios internos especiais."""
+    root = os.path.abspath(str(root))
+    stats.setdefault(counter_key, 0)
+    removed = 0
+    protected_names = {'.obsidian', '.trash', '.git', '__pycache__'}
+    if not os.path.isdir(root):
+        return 0
+    for current_root, dirnames, _ in os.walk(root, topdown=False):
+        for dirname in dirnames:
+            dir_path = os.path.join(current_root, dirname)
+            if dirname in protected_names:
+                continue
+            try:
+                if not os.path.isdir(dir_path) or os.path.islink(dir_path):
+                    continue
+                if any(os.scandir(dir_path)):
+                    continue
+                os.rmdir(dir_path)
+                removed += 1
+            except OSError:
+                continue
+    stats[counter_key] += removed
+    return removed
+
+
+def sync_item_collections_to_drive_collection(
+    zot: zotero.Zotero,
+    item_key: str,
+    drive_collection_key: str | None,
+    collection_by_key: dict[str, dict],
+    item: dict | None = None,
+) -> bool:
+    """Torna a coleção do drive a fonte de verdade entre as coleções espelhadas."""
+    if not item_key or not drive_collection_key or drive_collection_key not in collection_by_key:
+        return False
+    try:
+        current_item = item if item and item.get("data") else zot.item(item_key)
+        item_data = dict(current_item.get("data") or current_item)
+        current_collections = list(item_data.get("collections") or [])
+        unmanaged = [key for key in current_collections if key not in collection_by_key]
+        managed = [key for key in current_collections if key in collection_by_key]
+        if managed == [drive_collection_key]:
+            return False
+        new_collections = [*unmanaged, drive_collection_key]
+        if new_collections == current_collections:
+            return False
+        item_data["collections"] = new_collections
+        zot.update_item(item_data)
+        if item is not None:
+            item.setdefault("data", {})["collections"] = new_collections
+        logging.info(
+            "[COLLECTION] Item %s agora segue a coleção do drive %s (antes=%s, depois=%s).",
+            item_key,
+            drive_collection_key,
+            current_collections,
+            new_collections,
+        )
+        return True
+    except Exception as exc:
+        logging.warning(
+            "[COLLECTION] Falha ao alinhar item %s à coleção do drive %s: %s",
+            item_key,
+            drive_collection_key,
+            exc,
+        )
+        return False
 
 def build_expected_attachment_path_indexes(
     attachments: List[dict],
@@ -4270,6 +4353,8 @@ def run_sync_mode():
         'obsidian_pdfs_deduped': 0,
         'preprocessed_drive_copy_variants': 0,
         'blocked_drive_copy_variants': 0,
+        'removed_empty_drive_dirs': 0,
+        'removed_empty_obsidian_dirs': 0,
     }
     tie_conflicts: list[dict[str, str]] = []
 
@@ -4370,7 +4455,8 @@ def run_sync_mode():
     collections = fetch_zotero_collections(zot)
     collection_by_key, collection_children, collection_path_to_key = build_collection_path_model(collections)
     obsidian_root = resolve_obsidian_mirror_target_root(None)
-    ensure_collection_directories(collection_by_key, TARGET_FOLDER, obsidian_root, stats)
+    remove_empty_directories(TARGET_FOLDER, stats, 'removed_empty_drive_dirs')
+    remove_empty_directories(obsidian_root, stats, 'removed_empty_obsidian_dirs')
 
     ingest_obsidian_pdfs_to_drive(
         obsidian_root,
@@ -4395,10 +4481,9 @@ def run_sync_mode():
         all_attachments,
         parent_items_by_key,
         collection_by_key,
+        collection_path_to_key,
         drive_name_index_fast,
         drive_aggressive_index_fast,
-        drive_path_index_fast,
-        drive_path_aggressive_index_fast,
         key_to_path,
         stats,
     )
@@ -4488,12 +4573,27 @@ def run_sync_mode():
                 zotero_key = nome_info['key']
                 local_dir = os.path.join(LOCAL_COPY_DIR, zotero_key)
                 attachment_item = attachment_items_by_key.get(zotero_key)
+                attachment_parent_key = (attachment_item or {}).get('data', {}).get('parentItem')
+                if drive_collection_key:
+                    target_item_key = attachment_parent_key or zotero_key
+                    target_item = (
+                        parent_items_by_key.get(attachment_parent_key)
+                        if attachment_parent_key else attachment_item
+                    )
+                    sync_item_collections_to_drive_collection(
+                        zot,
+                        target_item_key,
+                        drive_collection_key,
+                        collection_by_key,
+                        item=target_item,
+                    )
                 expected_filename = os.path.basename(get_filename_from_item(attachment_item)) if attachment_item else file_name
                 desired_location = attachment_target_location(
                     attachment_item or {'data': {'key': zotero_key}},
                     expected_filename or file_name,
                     parent_items_by_key,
                     collection_by_key,
+                    preferred_collection_key=drive_collection_key,
                 )
                 desired_relpath = nome_info.get('relative_path') or desired_location['relative_path']
                 desired_drive_path = os.path.join(TARGET_FOLDER, *desired_relpath.split('/'))
@@ -4853,10 +4953,11 @@ def run_sync_mode():
                     register_local_hash(hash_index, key_to_path, new_key, local_path, info)
 
                 if parent_key and drive_collection_key and final_parent_key == parent_key:
-                    update_item_collection_membership(
+                    sync_item_collections_to_drive_collection(
                         zot,
                         parent_key,
                         drive_collection_key,
+                        collection_by_key,
                     )
 
                 if final_parent_key and not parent_key:
@@ -4919,10 +5020,9 @@ def run_sync_mode():
             all_attachments,
             parent_items_by_key,
             collection_by_key,
+            collection_path_to_key,
             drive_name_index,
             drive_aggressive_index,
-            drive_path_index,
-            drive_path_aggressive_index,
             key_to_path,
             stats,
         )
@@ -4987,8 +5087,11 @@ def run_sync_mode():
 │ PDFs bloqueados Obsidian: {stats['obsidian_pdfs_blocked']:<18} │
 │ PDFs deduplicados Obsidian: {stats['obsidian_pdfs_deduped']:<15} │
 │ Arquivos realocados à coleção: {stats['moved_drive_files_to_collection']:<14} │
+│ Coleções alinhadas ao drive: {stats['drive_authoritative_collection_updates']:<13} │
 │ 🧹 Duplicados removidos: {stats['pruned_drive_duplicates']:<22} │
 │ ⬇️  Baixados do Zotero: {stats['downloaded_zotero']:<24} │
+│ Pastas vazias remov. drive: {stats['removed_empty_drive_dirs']:<13} │
+│ Pastas vazias remov. Obsidian: {stats['removed_empty_obsidian_dirs']:<9} │
 │ 📤 Materializados no drive: {stats['materialized_drive']:<20} │
 │ ⚖️  Empates de mtime: {stats['mtime_ties']:<25} │
 │ 🛑 Bloqueios anti-duplicata: {stats['blocked_duplicate_risk']:<18} │

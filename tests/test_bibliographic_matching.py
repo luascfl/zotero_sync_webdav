@@ -642,6 +642,42 @@ class BibliographicMatchingTests(unittest.TestCase):
         self.assertIn("fallbackParents", bootstrap)
 
 
+    def test_sync_item_collections_to_drive_collection_replaces_managed_subset(self):
+        class FakeZotero:
+            def __init__(self):
+                self.updated = []
+
+            def update_item(self, item):
+                self.updated.append(item)
+
+        zot = FakeZotero()
+        item = {"data": {"collections": ["OLDCOL", "FREEFORM"]}}
+        changed = zsync.sync_item_collections_to_drive_collection(
+            zot,
+            "ITEM1",
+            "NEWCOL",
+            {"OLDCOL": {}, "NEWCOL": {}},
+            item=item,
+        )
+        self.assertTrue(changed)
+        self.assertEqual(item["data"]["collections"], ["FREEFORM", "NEWCOL"])
+        self.assertEqual(zot.updated[0]["collections"], ["FREEFORM", "NEWCOL"])
+
+    def test_remove_empty_directories_preserves_obsidian(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            empty = root / "A"
+            empty.mkdir()
+            protected = root / ".obsidian"
+            protected.mkdir()
+            stats = {}
+            removed = zsync.remove_empty_directories(root, stats, "removed")
+            self.assertEqual(removed, 1)
+            self.assertFalse(empty.exists())
+            self.assertTrue(protected.exists())
+            self.assertEqual(stats["removed"], 1)
+
+
 
 if __name__ == "__main__":
     unittest.main()
