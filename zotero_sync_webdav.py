@@ -3810,6 +3810,93 @@ def sync_item_collections_to_drive_collection(
             exc,
         )
         return False
+def collect_nonempty_directory_paths(root: str | Path) -> list[str]:
+    """Lista diretórios relativos que têm conteúdo útil sob a raiz."""
+    root = os.path.abspath(str(root))
+    if not os.path.isdir(root):
+        return []
+    protected_names = {'.obsidian', '.trash', '.git', '__pycache__'}
+    discovered: set[str] = set()
+    for current_root, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in protected_names]
+        relative_dir = relpath_from_root(root, current_root)
+        has_files = any(not name.startswith('.') for name in filenames)
+        if has_files and relative_dir != '.':
+            discovered.add(relative_dir)
+    return sorted(discovered, key=lambda value: (value.count('/'), value.casefold()))
+
+
+def ensure_drive_content_collections(
+    zot: zotero.Zotero,
+    drive_root: str,
+    collection_by_key: dict[str, dict],
+    collection_path_to_key: dict[str, str],
+    stats: dict,
+) -> bool:
+    """Cria coleções Zotero ausentes para pastas não vazias já existentes no drive."""
+    stats.setdefault('created_zotero_collections_from_drive', 0)
+    changed = False
+    for relative_path in collect_nonempty_directory_paths(drive_root):
+        normalized = normalize_relative_path_key(relative_path)
+        if not normalized or normalized in collection_path_to_key:
+            continue
+
+        parent_collection_key = None
+        built_parts: list[str] = []
+        for part in [part for part in relative_path.split('/') if part]:
+            built_parts.append(part)
+            partial_path = '/'.join(built_parts)
+            normalized_partial = normalize_relative_path_key(partial_path)
+            existing_key = collection_path_to_key.get(normalized_partial)
+            if existing_key:
+                parent_collection_key = existing_key
+                continue
+
+            try:
+                created = zot.create_collection([
+                    {
+                        'name': part,
+                        'parentCollection': parent_collection_key or '',
+                    }
+                ])
+                created_key = None
+                if isinstance(created, dict):
+                    created_key = (
+                        created.get('successful', {})
+                        .get('0', {})
+                        .get('key')
+                    )
+                if not created_key:
+                    logging.warning(
+                        "[COLLECTION] Coleção '%s' criada sem chave retornada clara para o caminho '%s'.",
+                        part,
+                        partial_path,
+                    )
+                    continue
+                collection_by_key[created_key] = {
+                    'key': created_key,
+                    'name': part,
+                    'parent': parent_collection_key,
+                    'relative_parts': list(built_parts),
+                    'relative_path': partial_path,
+                }
+                collection_path_to_key[normalized_partial] = created_key
+                parent_collection_key = created_key
+                stats['created_zotero_collections_from_drive'] += 1
+                changed = True
+                logging.info(
+                    "[COLLECTION] Coleção criada a partir do conteúdo do drive: '%s' (key=%s).",
+                    partial_path,
+                    created_key,
+                )
+            except Exception as exc:
+                logging.warning(
+                    "[COLLECTION] Falha ao criar coleção a partir da pasta '%s': %s",
+                    partial_path,
+                    exc,
+                )
+                break
+    return changed
 
 def build_expected_attachment_path_indexes(
     attachments: List[dict],
@@ -4347,6 +4434,8 @@ def run_sync_mode():
         'desktop_parent_fallbacks': 0,
         'created_drive_collection_dirs': 0,
         'created_obsidian_collection_dirs': 0,
+        'created_zotero_collections_from_drive': 0,
+        'drive_authoritative_collection_updates': 0,
         'obsidian_new_pdfs_detected': 0,
         'obsidian_pdfs_moved_to_drive': 0,
         'obsidian_pdfs_blocked': 0,
@@ -4454,9 +4543,19 @@ def run_sync_mode():
 
     collections = fetch_zotero_collections(zot)
     collection_by_key, collection_children, collection_path_to_key = build_collection_path_model(collections)
+    if ensure_drive_content_collections(
+        zot,
+        TARGET_FOLDER,
+        collection_by_key,
+        collection_path_to_key,
+        stats,
+    ):
+        collections = fetch_zotero_collections(zot)
+        collection_by_key, collection_children, collection_path_to_key = build_collection_path_model(collections)
     obsidian_root = resolve_obsidian_mirror_target_root(None)
     remove_empty_directories(TARGET_FOLDER, stats, 'removed_empty_drive_dirs')
     remove_empty_directories(obsidian_root, stats, 'removed_empty_obsidian_dirs')
+    ensure_collection_directories(collection_by_key, TARGET_FOLDER, obsidian_root, stats)
 
     ingest_obsidian_pdfs_to_drive(
         obsidian_root,
@@ -5082,6 +5181,7 @@ def run_sync_mode():
 │ Itens pai fallback: {stats['desktop_parent_fallbacks']:<24} │
 │ Pastas coleção drive: {stats['created_drive_collection_dirs']:<22} │
 │ Pastas coleção Obsidian: {stats['created_obsidian_collection_dirs']:<19} │
+│ Coleções criadas do drive: {stats['created_zotero_collections_from_drive']:<14} │
 │ PDFs novos no Obsidian: {stats['obsidian_new_pdfs_detected']:<21} │
 │ PDFs movidos ao drive: {stats['obsidian_pdfs_moved_to_drive']:<22} │
 │ PDFs bloqueados Obsidian: {stats['obsidian_pdfs_blocked']:<18} │

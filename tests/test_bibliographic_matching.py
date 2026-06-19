@@ -677,6 +677,53 @@ class BibliographicMatchingTests(unittest.TestCase):
             self.assertTrue(protected.exists())
             self.assertEqual(stats["removed"], 1)
 
+    def test_collect_nonempty_directory_paths_ignores_empty_dirs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "UNEB Psicologia 2026.1" / "Disciplina").mkdir(parents=True)
+            (root / "UNEB Psicologia 2026.1" / "Disciplina" / "texto.pdf").write_bytes(b"x")
+            (root / "UNEB Psicologia 2026.1" / "Vazia").mkdir(parents=True)
+            discovered = zsync.collect_nonempty_directory_paths(root)
+            self.assertEqual(discovered, ["UNEB Psicologia 2026.1/Disciplina"])
+
+    def test_ensure_drive_content_collections_creates_missing_chain(self):
+        class FakeZotero:
+            def __init__(self):
+                self.calls = []
+                self.next_id = 0
+
+            def create_collection(self, payload):
+                self.next_id += 1
+                key = f"COL{self.next_id}"
+                entry = payload[0]
+                self.calls.append((entry["name"], entry.get("parentCollection") or None))
+                return {"successful": {"0": {"key": key}}}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "UNEB Psicologia 2026.1" / "Nova Disciplina").mkdir(parents=True)
+            (root / "UNEB Psicologia 2026.1" / "Nova Disciplina" / "texto.pdf").write_bytes(b"x")
+            zot = FakeZotero()
+            collection_by_key = {}
+            collection_path_to_key = {}
+            stats = {}
+            changed = zsync.ensure_drive_content_collections(
+                zot,
+                str(root),
+                collection_by_key,
+                collection_path_to_key,
+                stats,
+            )
+            self.assertTrue(changed)
+            self.assertEqual(
+                zot.calls,
+                [("UNEB Psicologia 2026.1", None), ("Nova Disciplina", "COL1")],
+            )
+            self.assertEqual(
+                collection_path_to_key["uneb psicologia 2026.1/nova disciplina"],
+                "COL2",
+            )
+            self.assertEqual(stats["created_zotero_collections_from_drive"], 2)
+
 
 
 if __name__ == "__main__":
