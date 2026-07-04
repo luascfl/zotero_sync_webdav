@@ -10,46 +10,26 @@ Harden the existing Linux Zotero/WebDAV automation scripts, with `zotero_sync_we
 - Do not use live Zotero API calls in unit tests.
 
 ## Milestone 0: governance bootstrap
-Status: active for this orchestration cycle.
-
-Deliverables:
-- `.context/docs/` filled with current project context.
-- `.context/docs/planning_gsd/PROJECT.md` and `STATE.md` created.
-- `.context/prd_ralph/prd.json` and README created.
-- `.context/workflow/status.yaml` initialized.
-- `AGENTS.md` and `GEMINI.md` made operational for this project.
-
-Dependencies:
-- User clarification on scope, automation posture, target environment, priority, and removed file status. Completed on 2026-04-30.
-
-Exit criteria:
-- Canonical context files exist.
-- PRD contains executable Ralph stories with quality gates.
-- Next story has DoD and Gemini prompt.
+Status: complete.
 
 ## Milestone 1: main synchronizer hardening
-Status: next.
+Status: complete.
+
+## Milestone 2: Obsidian Integration & Collections Routing
+Status: complete.
 
 Goal:
-Make `zotero_sync_webdav.py` testable and truthful before changing deeper sync behavior.
+Integrate Obsidian staging, drive-authoritative collection mapping, Desktop API bypass, and copy-marker cleanup.
+
+## Milestone 3: Rclone Resilience & Scalability
+Status: complete. Completed on 2026-07-03.
+
+Goal:
+Fix the systemic timeout issue causing the full sync to abort after 1 hour due to stalled PDF hashing over the rclone mount. Resolve the 291 missing/orphaned file paths safely.
 
 Story order:
-1. US-001: make the main synchronizer import-safe and add a first unit-test harness.
-2. US-002: cover filesystem mutation helpers for copy, rename, and hash cache behavior.
-3. US-003: add preflight checks for Linux WebDAV, dependency availability, and local storage writability.
-4. US-004: make final reporting and process exit status reflect critical failures.
+1. US-005: Rclone timeout resilience and hashing bypass.
+2. US-006: Orphaned file recovery pass.
 
 Dependencies:
-- Milestone 0 must be complete.
-- US-002 depends on US-001.
-- US-003 depends on US-001.
-- US-004 depends on US-001 and should reuse the test harness.
-
-## Milestone 2: support script consistency
-Status: planned.
-
-Goal:
-Apply the same failure and testability standards to diagnostics, duplicate cleanup, and Obsidian mirror scripts without expanding product scope.
-
-Dependencies:
-- Milestone 1 complete or stable enough to reuse patterns.
+- Milestone 2 complete.

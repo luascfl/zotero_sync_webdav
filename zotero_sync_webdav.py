@@ -100,39 +100,60 @@ def load_env_file(env_path: os.PathLike[str] | str, override: bool = False) -> N
                 os.environ[key] = value
     except OSError as exc:
         logging.warning("Falha ao carregar variáveis do arquivo %s: %s", env_file, exc)
+LIBRARY_ID = ""
+LIBRARY_TYPE = "user"
+API_KEY = ""
+TARGET_FOLDER_RAW = ""
+TARGET_FOLDER = ""
 
+_config_loaded = False
 
-if env_file_from_env:
-    load_env_file(env_file_from_env, override=True)
-else:
-    # Prioriza a configuração operacional do serviço/autostart. O .env do projeto fica
-    # como fallback local para desenvolvimento e não deve sobrescrever a configuração operacional.
-    load_env_file(CONFIG_ENV_FILE, override=True)
-    load_env_file(PROJECT_ENV_FILE, override=False)
+def load_config() -> None:
+    global LIBRARY_ID, LIBRARY_TYPE, API_KEY, TARGET_FOLDER_RAW, TARGET_FOLDER, _config_loaded
+    if _config_loaded:
+        return
+    
+    env_file_from_env = os.environ.get("ZOTERO_ENV_FILE")
+    if env_file_from_env:
+        load_env_file(env_file_from_env, override=True)
+    else:
+        load_env_file(CONFIG_ENV_FILE, override=True)
+        load_env_file(PROJECT_ENV_FILE, override=False)
 
-# --- Configuração Final (via .env / variáveis de ambiente) ---
-LIBRARY_ID = os.environ.get("ZOTERO_LIBRARY_ID")
-LIBRARY_TYPE = os.environ.get("ZOTERO_LIBRARY_TYPE", "user")
-API_KEY = os.environ.get("ZOTERO_API_KEY")
+    LIBRARY_ID = os.environ.get("ZOTERO_LIBRARY_ID", "")
+    LIBRARY_TYPE = os.environ.get("ZOTERO_LIBRARY_TYPE", "user")
+    API_KEY = os.environ.get("ZOTERO_API_KEY", "")
+    TARGET_FOLDER_RAW = os.environ.get("ZOTERO_SYNC_TARGET_FOLDER", "")
+    TARGET_FOLDER = resolve_target_folder(TARGET_FOLDER_RAW)
 
-TARGET_FOLDER_RAW = os.environ.get("ZOTERO_SYNC_TARGET_FOLDER")
+    if TARGET_FOLDER_RAW != TARGET_FOLDER:
+        logging.info("Pasta alvo configurada: %s (valor original: %s)", TARGET_FOLDER, TARGET_FOLDER_RAW)
+    else:
+        logging.info("Pasta alvo configurada: %s", TARGET_FOLDER)
+    logging.info("Biblioteca Zotero configurada: %s (%s)", LIBRARY_ID, LIBRARY_TYPE)
 
-missing_env = [name for name, value in {
-    "ZOTERO_LIBRARY_ID": LIBRARY_ID,
-    "ZOTERO_API_KEY": API_KEY,
-    "ZOTERO_SYNC_TARGET_FOLDER": TARGET_FOLDER_RAW,
-}.items() if not value]
+    _config_loaded = True
 
-if missing_env:
-    raise RuntimeError(
-        f"Defina as variáveis de ambiente obrigatórias ({', '.join(missing_env)}). "
-        "Use ~/.config/zotero_sync_webdav/zotero_sync.env, um .env na raiz do projeto, "
-        "ZOTERO_ENV_FILE ou exporte-as antes de executar."
-    )
+def check_environment_requirements() -> None:
+    """Valida a presença das variáveis de ambiente obrigatórias."""
+    load_config()
+    missing_env = [name for name, value in {
+        "ZOTERO_LIBRARY_ID": LIBRARY_ID,
+        "ZOTERO_API_KEY": API_KEY,
+        "ZOTERO_SYNC_TARGET_FOLDER": TARGET_FOLDER_RAW,
+    }.items() if not value]
 
+    if missing_env:
+        raise RuntimeError(
+            f"Defina as variáveis de ambiente obrigatórias ({', '.join(missing_env)}). "
+            "Use ~/.config/zotero_sync_webdav/zotero_sync.env, um .env na raiz do projeto, "
+            "ZOTERO_ENV_FILE ou exporte-as antes de executar."
+        )
 
-def resolve_target_folder(raw_path: str) -> str:
+def resolve_target_folder(raw_path: str | None) -> str:
     """Resolve o caminho da pasta alvo, tentando decodificar espaços/percent-encoding."""
+    if not raw_path:
+        return ""
     expanded = os.path.expanduser(raw_path)
     candidates = [expanded]
 
@@ -148,9 +169,12 @@ def resolve_target_folder(raw_path: str) -> str:
         if os.path.isdir(candidate):
             return candidate
     return expanded
-
-
 TARGET_FOLDER = resolve_target_folder(TARGET_FOLDER_RAW)
+
+def get_target_folder() -> str:
+    check_environment_requirements()
+    return TARGET_FOLDER
+
 
 # Pasta onde o Zotero Desktop espera encontrar os anexos importados.
 # Esta cópia local em ~/Zotero/storage é necessária para o workflow prático do projeto:
@@ -183,7 +207,7 @@ MAX_ATTACHMENTS_TO_CHECK = 0  # 0 = todos os anexos do Zotero
 
 # Ativar logs detalhados no console
 DEBUG_DETAILED = True
-HASH_READ_TIMEOUT_SECONDS_DEFAULT = 180
+HASH_READ_TIMEOUT_SECONDS_DEFAULT = 30
 CONTENT_PROBE_TIMEOUT_SECONDS_DEFAULT = 60
 PYZOTERO_UPLOAD_TIMEOUT_SECONDS_DEFAULT = 900
 
@@ -516,11 +540,7 @@ def finalize_execution(stats: dict, summary_text: str | None = None) -> None:
     send_completion_notification(stats, LOG_FILE_PATH)
 
 
-if TARGET_FOLDER_RAW != TARGET_FOLDER:
-    logging.info("Pasta alvo configurada: %s (valor original: %s)", TARGET_FOLDER, TARGET_FOLDER_RAW)
-else:
-    logging.info("Pasta alvo configurada: %s", TARGET_FOLDER)
-logging.info("Biblioteca Zotero configurada: %s (%s)", LIBRARY_ID, LIBRARY_TYPE)
+# Logging de configuração movido para load_config() para import-safety.
 
 
 # --- Funções de Normalização ---
@@ -1679,12 +1699,13 @@ def run_safe_bibliographic_duplicate_cleanup(
 
 def connect_zotero_client() -> zotero.Zotero:
     """Conecta na API do Zotero usando a configuração ativa."""
+    check_environment_requirements()
     client = zotero.Zotero(LIBRARY_ID, LIBRARY_TYPE, API_KEY)
     client.key_info()
     return client
 
-
 def run_diagnostic_mode() -> None:
+    check_environment_requirements()
     print(f'🔗 Conectando ao Zotero (library_id={LIBRARY_ID}, type={LIBRARY_TYPE})...')
     try:
         client = connect_zotero_client()
@@ -2068,6 +2089,9 @@ def compute_sha256(
 
     if cache_ref is not None:
         cached = get_cached_hash(abspath, cache_ref, stat)
+        if cached == "QUARANTINE_TIMEOUT":
+            logging.warning("[HASH] Arquivo ignorado (quarentena de timeout recente): '%s'.", path)
+            return None
         if cached:
             logging.debug("[HASH] Cache hit para '%s'.", path)
             return cached
@@ -2107,10 +2131,12 @@ def compute_sha256(
         logging.info("[HASH] SHA-256 concluído para '%s' em %.1fs.", path, elapsed)
     except TimeoutError:
         logging.error(
-            "[HASH] Timeout após %ss ao calcular SHA-256 de '%s'. Arquivo ignorado nesta execução.",
+            "[HASH] Timeout após %ss ao calcular SHA-256 de '%s'. Adicionado à quarentena.",
             effective_timeout,
             path,
         )
+        if cache_ref is not None:
+            set_cached_hash(abspath, "QUARANTINE_TIMEOUT", cache_ref, stat)
         return None
     except OSError as exc:
         logging.warning("[HASH] Não foi possível calcular hash de '%s': %s", path, exc)
@@ -3278,6 +3304,7 @@ def materialize_zotero_attachments_to_drive(
 
 
 def reconcile_drive_collection_paths(
+    zot: zotero.Zotero,
     attachments: List[dict],
     parent_items_by_key: dict[str, dict],
     collection_by_key: dict[str, dict],
@@ -4391,14 +4418,150 @@ def build_cli_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         help='Argumentos extras repassados ao configurador embutido',
     )
+    recovery_parser = subparsers.add_parser(
+        'recover-orphans',
+        help='Recupera PDFs órfãos do Zotero que faltam no drive',
+    )
+    recovery_parser.add_argument('--dry-run', action='store_true', help='Simula sem materializar')
+
     return parser
+
+
+
+def run_recover_orphans_mode(dry_run: bool = False) -> None:
+    """Recupera PDFs órfãos: conhecidos pelo Zotero mas ausentes no drive."""
+    check_environment_requirements()
+    print("🔍 Recuperação de PDFs órfãos do Zotero")
+    print(f"   Modo: {'simulação (dry-run)' if dry_run else 'execução real'}")
+    
+    zot = connect_zotero_client()
+    print("✓ Conexão com a Zotero API bem-sucedida.")
+    
+    stats = {
+        'zotero_attachments_scanned': 0,
+        'zotero_unique_filenames': 0,
+        'errors': 0,
+        'materialized_drive': 0,
+        'downloaded_zotero': 0,
+        'renamed_webdav': 0,
+        'moved_drive_files_to_collection': 0,
+    }
+    
+    (all_attachments, existing_filenames, existing_filenames_aggressive) = collect_all_attachments(zot, stats)
+    
+    collections = fetch_zotero_collections(zot)
+    collection_by_key, children_map, collection_path_to_key = build_collection_path_model(collections)
+    
+    parent_items = collect_all_bibliographic_items(zot, stats)
+    parent_items_by_key = build_item_by_key(parent_items)
+    
+    drive_name_index, drive_aggressive_index, drive_path_index, drive_path_aggressive_index, drive_hash_index = build_drive_pdf_index(TARGET_FOLDER, stats)
+    
+    key_to_path: Dict[str, str] = {}
+    
+    # Find orphaned attachments
+    orphan_count = 0
+    for item in all_attachments:
+        data = item.get('data', {})
+        key = item.get('key')
+        filename = get_filename_from_item(item)
+        if not filename or not filename.lower().endswith('.pdf'):
+            continue
+        filename = os.path.basename(filename)
+        norm = normalize_filename(filename)
+        agg = normalize_aggressive(filename)
+        if norm in drive_name_index or agg in drive_aggressive_index:
+            continue
+        orphan_count += 1
+    
+    print(f"\n📊 Encontrados {orphan_count} PDFs órfãos (no Zotero, ausentes no drive).")
+    
+    if dry_run:
+        print("   (dry-run: nenhum arquivo será materializado)")
+        return
+    
+    if orphan_count == 0:
+        print("   Nada a recuperar.")
+        return
+    
+    tie_conflicts: list[dict[str, str]] = []
+    materialize_zotero_attachments_to_drive(
+        zot,
+        all_attachments,
+        parent_items_by_key,
+        collection_by_key,
+        drive_name_index,
+        drive_aggressive_index,
+        drive_path_index,
+        drive_path_aggressive_index,
+        drive_hash_index,
+        key_to_path,
+        stats,
+        tie_conflicts,
+    )
+    
+    print(f"\n✅ Recuperação concluída:")
+    print(f"   Materializados: {stats['materialized_drive']}")
+    print(f"   Baixados do Zotero: {stats['downloaded_zotero']}")
+    print(f"   Erros: {stats['errors']}")
+    
+    if stats['errors'] > 0:
+        sys.exit(1)
+
+def preflight_checks() -> list[str]:
+    """Valida pré-requisitos antes de iniciar o sync.
+    
+    Retorna lista de erros. Lista vazia = tudo OK.
+    """
+    errors: list[str] = []
+    
+    # 1. Variáveis de ambiente
+    try:
+        check_environment_requirements()
+    except RuntimeError as e:
+        errors.append(str(e))
+        return errors  # sem config, não faz sentido checar o resto
+    
+    # 2. Pasta alvo existe e é legível
+    if not TARGET_FOLDER:
+        errors.append("ZOTERO_SYNC_TARGET_FOLDER está vazio após resolução.")
+    elif not os.path.isdir(TARGET_FOLDER):
+        errors.append(f"Pasta alvo não encontrada ou não é diretório: {TARGET_FOLDER}")
+    elif not os.access(TARGET_FOLDER, os.R_OK):
+        errors.append(f"Pasta alvo sem permissão de leitura: {TARGET_FOLDER}")
+    
+    # 3. Local storage existe e é gravável
+    if os.path.isdir(LOCAL_COPY_DIR):
+        if not os.access(LOCAL_COPY_DIR, os.W_OK):
+            errors.append(f"Pasta de storage local sem permissão de escrita: {LOCAL_COPY_DIR}")
+    else:
+        try:
+            os.makedirs(LOCAL_COPY_DIR, exist_ok=True)
+        except OSError as exc:
+            errors.append(f"Não foi possível criar pasta de storage local {LOCAL_COPY_DIR}: {exc}")
+    
+    # 4. Zotero Desktop (opcional, não bloqueia)
+    # Apenas informativo — não adicionamos erro aqui.
+    
+    return errors
+
 
 
 def run_sync_mode():
     """Executa a sincronização observando API do Zotero, drive montado e storage local."""
     configure_pyzotero_upload_transport()
+    
+    # 0. Preflight
+    pf_errors = preflight_checks()
+    if pf_errors:
+        for e in pf_errors:
+            logging.error("[PREFLIGHT] %s", e)
+        print("❌ Preflight falhou:")
+        for e in pf_errors:
+            print(f"  - {e}")
+        sys.exit(1)
+    
     print("Iniciando o sincronizador Zotero/WebDAV (v2.0)")
-
     stats = {
         'added': 0,
         'skipped': 0,
@@ -4449,13 +4612,13 @@ def run_sync_mode():
 
     # 1. Conectar ao Zotero
     try:
-        zot = zotero.Zotero(LIBRARY_ID, LIBRARY_TYPE, API_KEY)
-        zot.key_info()
+        check_environment_requirements()
+        zot = connect_zotero_client()
         print("✓ Conexão com a Zotero API bem-sucedida.")
     except Exception as e:
         logging.error(f"Falha ao conectar à Zotero API. Verifique suas credenciais. Erro: {e}")
         finalize_execution(stats)
-        return
+        sys.exit(1)
 
     # 2. Coletar TODOS os anexos existentes no Zotero
     print("\nColetando anexos da biblioteca Zotero... (pode levar alguns instantes)")
@@ -4577,6 +4740,7 @@ def run_sync_mode():
     hash_index, key_to_path = build_local_storage_index(existing_filenames)
     drive_name_index_fast, drive_aggressive_index_fast, drive_path_index_fast, drive_path_aggressive_index_fast = build_drive_name_path_indexes(TARGET_FOLDER)
     reconcile_drive_collection_paths(
+        zot,
         all_attachments,
         parent_items_by_key,
         collection_by_key,
@@ -5116,6 +5280,7 @@ def run_sync_mode():
             tie_conflicts,
         )
         reconcile_drive_collection_paths(
+            zot,
             all_attachments,
             parent_items_by_key,
             collection_by_key,
@@ -5206,15 +5371,19 @@ def run_sync_mode():
 """
     print(summary)
     finalize_execution(stats, summary)
+    
+    # US-004: exit nonzero when critical errors occurred
+    if stats.get('errors', 0) > 0:
+        sys.exit(1)
 
 
-def main(argv: List[str] | None = None) -> None:
+def main(argv: List[str] | None = None) -> int:
     parser = build_cli_parser()
     args = parser.parse_args(argv)
 
     if args.command in (None, 'sync'):
         run_sync_mode()
-        return
+        return 0
     if args.command == 'diagnostico':
         run_diagnostic_mode()
         return
@@ -5239,10 +5408,19 @@ def main(argv: List[str] | None = None) -> None:
     if args.command == 'obsidian-setup':
         run_obsidian_setup_mode(args)
         return
+    if args.command == 'recover-orphans':
+        run_recover_orphans_mode(dry_run=args.dry_run)
+        return
 
 
     parser.error(f'Comando não suportado: {args.command}')
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        logging.error("Erro fatal não tratado: %s", exc, exc_info=True)
+        sys.exit(2)

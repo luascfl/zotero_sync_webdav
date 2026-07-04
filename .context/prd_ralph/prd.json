@@ -36,19 +36,45 @@
   "dataModel": [
     {
       "entity": "ZoteroAttachment",
-      "fields": ["key", "data.filename", "data.path", "data.dateAdded", "data.parentItem"]
+      "fields": [
+        "key",
+        "data.filename",
+        "data.path",
+        "data.dateAdded",
+        "data.parentItem"
+      ]
     },
     {
       "entity": "WebDAVPdf",
-      "fields": ["path", "filename", "mtime", "sha256"]
+      "fields": [
+        "path",
+        "filename",
+        "mtime",
+        "sha256"
+      ]
     },
     {
       "entity": "HashCacheEntry",
-      "fields": ["path", "mtime", "size", "sha256"]
+      "fields": [
+        "path",
+        "mtime",
+        "size",
+        "sha256"
+      ]
     },
     {
       "entity": "RunStats",
-      "fields": ["added", "skipped", "errors", "processed", "local_copies", "hash_matches", "renamed_webdav", "renamed_local", "updated_content"]
+      "fields": [
+        "added",
+        "skipped",
+        "errors",
+        "processed",
+        "local_copies",
+        "hash_matches",
+        "renamed_webdav",
+        "renamed_local",
+        "updated_content"
+      ]
     }
   ],
   "importFormat": {
@@ -70,7 +96,7 @@
     {
       "id": "US-001",
       "title": "Make main sync import-safe and testable",
-      "status": "open",
+      "status": "done",
       "dependsOn": [],
       "description": "As a maintainer, I want zotero_sync_webdav.py to be import-safe so tests can exercise pure helpers without secrets, a mounted WebDAV folder, or live Zotero calls.",
       "acceptanceCriteria": [
@@ -85,8 +111,10 @@
     {
       "id": "US-002",
       "title": "Test filesystem mutation helpers",
-      "status": "open",
-      "dependsOn": ["US-001"],
+      "status": "done",
+      "dependsOn": [
+        "US-001"
+      ],
       "description": "As a maintainer, I want copy, rename, and hash-cache helpers covered by temporary-directory tests so file mutation behavior does not regress silently.",
       "acceptanceCriteria": [
         "Add unit tests for rename_webdav_file covering successful rename and existing-destination collision.",
@@ -100,8 +128,10 @@
     {
       "id": "US-003",
       "title": "Add automated preflight checks",
-      "status": "open",
-      "dependsOn": ["US-001"],
+      "status": "done",
+      "dependsOn": [
+        "US-001"
+      ],
       "description": "As an unattended automation user, I want preflight checks to catch missing Linux/WebDAV and local-storage prerequisites before the sync starts mutating Zotero or files.",
       "acceptanceCriteria": [
         "Add a preflight function for required config values, WebDAV folder existence, WebDAV readability, local storage writability, and optional desktop tooling availability.",
@@ -115,8 +145,10 @@
     {
       "id": "US-004",
       "title": "Make run outcome truthful",
-      "status": "open",
-      "dependsOn": ["US-001"],
+      "status": "done",
+      "dependsOn": [
+        "US-001"
+      ],
       "description": "As an operator, I want the script's final report and process result to clearly distinguish completed syncs from critical failures.",
       "acceptanceCriteria": [
         "Define critical failures for missing config, failed Zotero connection, missing target folder, failed attachment add, failed copy when required, and unexpected processing exceptions.",
@@ -124,6 +156,33 @@
         "Example: when Zotero connection fails, the final output records the failure and the process exits nonzero.",
         "Negative case: a run with zero PDFs in an existing target folder exits successfully and reports no work rather than failure.",
         "Add tests for success, no-work, and critical-failure outcome mapping without live Zotero calls.",
+        "The quality gates pass."
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "Rclone timeout resilience and hashing bypass",
+      "status": "done",
+      "dependsOn": [],
+      "description": "As a user, I want the sync script to bypass or quickly skip stalled file hashing on the rclone mount so the sync completes within 1 hour.",
+      "acceptanceCriteria": [
+        "Reduce the remote file read/hash timeout from 180s down to a much lower threshold (e.g. 15s to 30s) so multiple stalled files do not consume the 1-hour harness execution window.",
+        "Ensure that files that time out are explicitly skipped and logged without aborting the entire sync process.",
+        "Provide a short-term memory or 'quarantine' list of files that timed out recently so subsequent sync passes do not retry them endlessly before processing new files.",
+        "If possible, bypass hashing for already-known matched files relying on mtime and size, skipping the full content hash on every run.",
+        "The quality gates pass."
+      ]
+    },
+    {
+      "id": "US-006",
+      "title": "Orphaned file recovery pass",
+      "status": "done",
+      "dependsOn": [],
+      "description": "As a user, I want the sync script to safely recover and materialize the 291 missing orphaned Zotero PDF attachments to the drive without mixing them into the standard heavy synchronization loop.",
+      "acceptanceCriteria": [
+        "Add a dedicated recovery pass or sub-command to handle rematerialization of Zotero PDFs that are known by the API but completely missing from their expected drive path.",
+        "Ensure the recovery ignores already-synchronized files.",
+        "Add unit tests for the recovery logic.",
         "The quality gates pass."
       ]
     }
