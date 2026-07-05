@@ -21,7 +21,13 @@ The primary topology is a local automation script that reads configuration from 
 - Hash/cache layer: SHA-256 hashes stored under `~/.cache/zotero_sync_webdav/hash_cache.json`.
 - Reporting layer: console output, logging, daily log file, optional desktop notification.
 - Unified operations layer: the main script now exposes sync, diagnostics, duplicate cleanup, and autostart setup from one CLI.
-- Support utilities: Obsidian mirror script.
+- Support utilities: unified collection routing, removing the need for a separate physical Obsidian mirror since `zoterodb` serves as the primary vault.
+
+## Core Architecture Paradigm: Unified Vault
+The Google Drive directory (`zoterodb`) serves concurrently as the Zotero physical storage target and the primary Obsidian Vault.
+- The script enforces Zotero's collection structure onto the Drive directory, organizing PDFs into collection folders.
+- Obsidian reads this identical folder structure natively.
+- Zotero exclusively manages the `.pdf` attachments. Obsidian manages the `.md` notes. The script strictly filters for `.pdf` files, actively ignoring Markdown notes and the `.obsidian` configuration folder, preventing pollution of the Zotero bibliographic database.
 
 ## Detected design patterns
 | Pattern | Confidence | Locations | Description |
