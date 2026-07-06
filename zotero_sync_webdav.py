@@ -1012,6 +1012,8 @@ def attachment_is_pdf(item: dict) -> bool:
     data = item.get('data', {})
     if data.get('itemType') != 'attachment':
         return False
+    if data.get('linkMode') == 'imported_url':
+        return False
     filename = get_filename_from_item(item)
     content_type = (data.get('contentType') or '').lower()
     return filename.lower().endswith('.pdf') or content_type == 'application/pdf'
