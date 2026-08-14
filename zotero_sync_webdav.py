@@ -1718,6 +1718,26 @@ def collect_all_bibliographic_items(zot: zotero.Zotero, stats: dict) -> List[dic
     return all_items
 
 
+def extract_pdf_content_preview(key: str, filename: str, max_lines: int = 5) -> str:
+    """Extrai as primeiras linhas de texto de um PDF no storage local para preview."""
+    pdf_path = os.path.join(LOCAL_COPY_DIR, key, filename)
+    if not os.path.isfile(pdf_path):
+        return "(arquivo não encontrado no storage local)"
+    try:
+        result = subprocess.run(
+            ["pdftotext", pdf_path, "-", "-l", "1"],
+            capture_output=True, text=True, timeout=10,
+        )
+        lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+        if not lines:
+            return "(sem texto extraível)"
+        return " | ".join(lines[:max_lines])
+    except FileNotFoundError:
+        return "(pdftotext não instalado)"
+    except Exception:
+        return "(erro ao extrair texto)"
+
+
 def build_duplicate_groups(attachments: List[dict]) -> List[dict]:
     """Agrupa anexos PDF duplicados por nome normalizado."""
     by_basic: Dict[str, List[dict]] = {}
@@ -2247,21 +2267,51 @@ def run_duplicate_cleanup_mode(execute: bool) -> None:
     deleted_err = 0
     for index, group in enumerate(groups, start=1):
         keeper = group['keeper']
+        all_items = [keeper] + group['to_delete']
         print(f"  Grupo #{index}  [{group['method']}]")
         print(f"  Arquivo: '{keeper['filename']}'")
-        print(
-            f"  ✔ Mantendo: key={keeper['key']}  dateAdded={keeper['dateAdded']}"
-            f"  parent={keeper['parentItem'] or '(sem pai)'}"
-        )
+        # Build content preview for each item
+        item_previews: dict[str, str] = {}
+        for item in all_items:
+            item_previews[item['key']] = extract_pdf_content_preview(item['key'], item['filename'])
+        # Determine which to_delete items are true content duplicates of the keeper
+        keeper_preview = item_previews[keeper['key']]
+        true_duplicates = []
+        different_content = []
         for item in group['to_delete']:
+            if item_previews[item['key']] == keeper_preview:
+                true_duplicates.append(item)
+            else:
+                different_content.append(item)
+        has_different_content = len(different_content) > 0
+        # Display all items
+        for item in all_items:
+            is_keeper = item['key'] == keeper['key']
+            is_protected = item in different_content
+            if is_keeper:
+                marker = "✔ Mantendo"
+            elif is_protected:
+                marker = "⏭️  Protegido (conteúdo diferente)"
+            else:
+                marker = "✗ Removendo"
             print(
-                f"  ✗ Removendo: key={item['key']}  dateAdded={item['dateAdded']}"
+                f"  {marker}: key={item['key']}  dateAdded={item['dateAdded']}"
                 f"  parent={item['parentItem'] or '(sem pai)'}"
             )
-        keys_to_delete = [item['key'] for item in group['to_delete']]
-        ok, err = delete_attachment_keys(client, keys_to_delete, dry_run=dry_run)
-        deleted_ok += ok
-        deleted_err += err
+            print(f"    📄 {item_previews[item['key']]}")
+        if has_different_content:
+            print(
+                f"  ⚠️  {len(different_content)} anexo(s) protegido(s): "
+                f"mesmo nome mas conteúdo diferente do keeper."
+            )
+        # Only delete true duplicates
+        keys_to_delete = [item['key'] for item in true_duplicates]
+        if keys_to_delete:
+            ok, err = delete_attachment_keys(client, keys_to_delete, dry_run=dry_run)
+            deleted_ok += ok
+            deleted_err += err
+        elif not has_different_content:
+            print("  (nada a remover)")
         print()
 
     print(f"\n{'═'*60}")
