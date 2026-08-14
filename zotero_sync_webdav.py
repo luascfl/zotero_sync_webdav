@@ -186,8 +186,16 @@ CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "zotero_sync_webdav"
 CACHE_FILE = os.path.join(CACHE_DIR, "hash_cache.json")
 CACHE_VERSION = 1
 
+REVIEW_DUPLICATE_TAG = "zotero-sync: revisar duplicata"
+ZOTERO_READONLY_UPDATE_FIELDS = {"lastRead", "dateAdded", "dateModified", "library"}
+PENDING_QUEUE_NOTIFICATION_SUMMARY = "Zotero fechado"
+COMPLETION_NOTIFICATION_SUMMARY = "Sync concluído"
+
 LOG_DIR = os.path.join(CACHE_DIR, "logs")
 LOG_FILE_NAME = "zotero_sync_today.log"
+SYNC_PROGRESS_NOTIFICATION_SUMMARY = "Sync em andamento"
+PENDING_IMPORTS_LOG_FILE_NAME = "zotero_pending_imports_today.log"
+PENDING_IMPORTS_LOG_DATE_FILE = os.path.join(LOG_DIR, ".last_pending_imports_log_date")
 LOG_DATE_FILE = os.path.join(LOG_DIR, ".last_log_date")
 LOG_DESKTOP_ID = "zotero-sync-log"
 LOG_DESKTOP_FILE = os.path.join(
@@ -495,37 +503,174 @@ def ensure_log_desktop_entry(log_path: str) -> str | None:
     return LOG_DESKTOP_ID
 
 
-def send_completion_notification(stats: dict, log_path: str | None) -> None:
-    """Envia notificação sobre a execução e oferece abertura rápida do log."""
-    if shutil.which("notify-send") is None:
-        logging.debug("[NOTIFY] notify-send não encontrado; pulando notificação.")
-        return
+def send_desktop_notification(
+    summary: str,
+    body: str,
+    icon: str = "zotero",
+    desktop_hint: str | None = None,
+) -> bool:
+    """Envia notificação por notify-send, com fallback para gdbus."""
+    if shutil.which("notify-send"):
+        cmd = ["notify-send", "-a", "Zotero Sync", "-i", icon]
+        if desktop_hint:
+            cmd.extend(["-h", f"string:desktop-entry:{desktop_hint}"])
+        cmd.extend([summary, body])
+        try:
+            result = subprocess.run(cmd, check=False)
+            if result.returncode == 0:
+                return True
+        except Exception as exc:
+            logging.warning("[NOTIFY] Falha ao enviar via notify-send: %s", exc)
 
+    if shutil.which("gdbus"):
+        cmd = [
+            "gdbus",
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.Notifications",
+            "--object-path",
+            "/org/freedesktop/Notifications",
+            "--method",
+            "org.freedesktop.Notifications.Notify",
+            "Zotero Sync",
+            "0",
+            icon,
+            summary,
+            body,
+            "[]",
+            "{}",
+            "5000",
+        ]
+        try:
+            result = subprocess.run(cmd, check=False)
+            if result.returncode == 0:
+                return True
+        except Exception as exc:
+            logging.warning("[NOTIFY] Falha ao enviar via gdbus: %s", exc)
+
+    logging.debug("[NOTIFY] Nenhum backend de notificação disponível.")
+    return False
+
+
+def build_pending_queue_notification_body(pending_count: int) -> str:
+    """Monta texto da notificação quando Zotero Desktop está fechado."""
+    if pending_count == 1:
+        return "1 PDF novo está na fila. Abra o Zotero para sincronizá-lo."
+    return f"{pending_count} PDFs novos estão na fila. Abra o Zotero para sincronizá-los."
+
+
+def build_first_open_sync_notification_body() -> str:
+    """Monta texto da primeira sync disparada ao abrir o Zotero."""
+    return "Zotero aberto detectado. Primeira sync iniciada."
+
+
+def build_sync_stage_notification_body(stage_name: str) -> str:
+    """Monta texto de progresso de etapa da sync."""
+    return f"Etapa: {stage_name}."
+
+
+def send_sync_progress_notification(body: str) -> None:
+    """Envia notificação de progresso de sync."""
+    send_desktop_notification(SYNC_PROGRESS_NOTIFICATION_SUMMARY, body, icon="zotero")
+
+
+def update_pending_import_queue_files(pending: list[str]) -> None:
+    """Mantém fila pendente em log diário, sem sidecar txt."""
+    pending_log = os.path.join(LOG_DIR, PENDING_IMPORTS_LOG_FILE_NAME)
+    legacy_pending_file = os.path.join(LOG_DIR, "zotero_pending_imports.txt")
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        if os.path.exists(legacy_pending_file):
+            os.remove(legacy_pending_file)
+        if not pending:
+            for path in (pending_log, PENDING_IMPORTS_LOG_DATE_FILE):
+                if os.path.exists(path):
+                    os.remove(path)
+            return
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now()
+        header_needed = True
+        if os.path.exists(PENDING_IMPORTS_LOG_DATE_FILE):
+            try:
+                header_needed = Path(PENDING_IMPORTS_LOG_DATE_FILE).read_text(encoding="utf-8") != today
+            except OSError:
+                header_needed = True
+        mode = "w" if header_needed else "a"
+        with open(pending_log, mode, encoding="utf-8") as fh:
+            if header_needed:
+                fh.write(f"# Log diário da fila do Zotero fechado - {today}\n")
+            fh.write(f"--- Fila atualizada: {now.isoformat()} ---\n")
+            fh.write(f"Pendentes: {len(pending)}\n")
+            for item in pending:
+                fh.write(f"- {item}\n")
+        Path(PENDING_IMPORTS_LOG_DATE_FILE).write_text(today, encoding="utf-8")
+        send_desktop_notification(
+            PENDING_QUEUE_NOTIFICATION_SUMMARY,
+            build_pending_queue_notification_body(len(pending)),
+            icon="zotero",
+        )
+    except Exception as exc:
+        logging.warning("[FILA] Erro ao atualizar lista de pendentes: %s", exc)
+
+
+def build_completion_notification_body(stats: dict, log_path: str | None) -> str:
+    """Monta o corpo da notificação de conclusão."""
     body_parts = [
         f"Adicionados: {stats.get('added', 0)}",
         f"Existentes: {stats.get('skipped', 0)}",
-        f"Erros: {stats.get('errors', 0)}",
     ]
+    if stats.get('errors', 0) > 0:
+        body_parts.append(f"Erros: {stats.get('errors', 0)}")
+    pending_count = len(stats.get('pending_desktop_imports', []))
+    if pending_count > 0:
+        body_parts.append(f"Fila: {pending_count}")
+    review_count = max(
+        int(stats.get('review_tags_applied', 0) or 0),
+        int(stats.get('blocked_duplicate_risk', 0) or 0),
+        int(stats.get('auto_duplicate_cleanup_skipped', 0) or 0),
+    )
     body = " • ".join(body_parts)
+    if review_count > 0:
+        body += (
+            f"\nRevisar duplicatas: {review_count}. "
+            f"Abra o Zotero e pesquise a tag '{REVIEW_DUPLICATE_TAG}'."
+        )
     if log_path:
         body += "\nClique para abrir o log de hoje."
+    return body
 
-    cmd = ["notify-send", "-a", "Zotero Sync", "-i", "text-x-log"]
 
+def send_completion_notification(stats: dict, log_path: str | None) -> None:
+    """Envia notificação sobre a execução e oferece abertura rápida do log."""
     desktop_hint = ensure_log_desktop_entry(log_path) if log_path else None
-    if desktop_hint:
-        cmd.extend(["-h", f"string:desktop-entry:{desktop_hint}"])
-
-    cmd.extend(["Sincronização Zotero/WebDAV concluída", body])
-
-    try:
-        subprocess.run(cmd, check=False)
-    except Exception as exc:
-        logging.warning("[NOTIFY] Falha ao enviar notificação: %s", exc)
+    send_desktop_notification(
+        COMPLETION_NOTIFICATION_SUMMARY,
+        build_completion_notification_body(stats, log_path),
+        icon="text-x-log",
+        desktop_hint=desktop_hint,
+    )
 
 
-def finalize_execution(stats: dict, summary_text: str | None = None) -> None:
+def finalize_execution(
+    stats: dict,
+    summary_text: str | None = None,
+    notify_completion: bool = True,
+) -> None:
     """Atualiza o log diário e dispara a notificação."""
+    global _HEADLESS_ZOTERO_PROC
+    if '_HEADLESS_ZOTERO_PROC' in globals() and _HEADLESS_ZOTERO_PROC is not None:
+        logging.info("[DESKTOP] Sincronização concluída. Encerrando Zotero invisível...")
+        try:
+            _HEADLESS_ZOTERO_PROC.terminate()
+            _HEADLESS_ZOTERO_PROC.wait(timeout=5)
+        except Exception:
+            _HEADLESS_ZOTERO_PROC.kill()
+        _HEADLESS_ZOTERO_PROC = None
+
+    update_pending_import_queue_files(stats.get('pending_desktop_imports', []))
+
     if LOG_FILE_PATH:
         try:
             with open(LOG_FILE_PATH, "a", encoding="utf-8") as fh:
@@ -537,7 +682,8 @@ def finalize_execution(stats: dict, summary_text: str | None = None) -> None:
         except OSError as exc:
             logging.warning("[LOG] Não foi possível gravar o resumo no log diário: %s", exc)
 
-    send_completion_notification(stats, LOG_FILE_PATH)
+    if notify_completion:
+        send_completion_notification(stats, LOG_FILE_PATH)
 
 
 # Logging de configuração movido para load_config() para import-safety.
@@ -859,12 +1005,43 @@ def filename_title_candidates(filename: str) -> List[str]:
     return candidates
 
 
+SEQUENCE_MARKER_RE = re.compile(
+    r'^(?P<base>.+?)\s+(?:(?:parte|part|volume|vol|tomo|livro|capitulo|cap|chapter)\s+)?'
+    r'(?P<marker>i|ii|iii|iv|v|vi|vii|viii|ix|x|[1-9][0-9]*)$'
+)
+
+
+def split_terminal_sequence_marker(value: str) -> tuple[str, str] | None:
+    """Separa marcador terminal de série, como I, II, III ou parte 1."""
+    normalized = normalize_bibliographic_text(value)
+    match = SEQUENCE_MARKER_RE.match(normalized)
+    if not match:
+        return None
+    base = match.group('base').strip()
+    marker = match.group('marker').strip()
+    if len(base) < 20:
+        return None
+    return base, marker
+
+
+def terminal_sequence_markers_conflict(left: str, right: str) -> bool:
+    """Detecta títulos de uma série que diferem apenas pelo marcador final."""
+    left_marker = split_terminal_sequence_marker(left)
+    right_marker = split_terminal_sequence_marker(right)
+    if not left_marker or not right_marker:
+        return False
+    return left_marker[0] == right_marker[0] and left_marker[1] != right_marker[1]
+
+
 def title_match_score(candidate_title: str, item_title: str) -> float:
     """Pontua uma possível correspondência de título sem aceitar palpites fracos."""
     candidate = normalize_bibliographic_text(candidate_title)
     title = normalize_bibliographic_text(item_title)
     if len(candidate) < 20 or len(title) < 20:
         return 0.0
+    if terminal_sequence_markers_conflict(candidate, title):
+        return 0.0
+
 
     if candidate == title:
         return 1.0
@@ -955,6 +1132,16 @@ def find_parent_candidates_for_pdf(
     return matches
 
 
+def top_parent_candidates_are_different_item_types(candidates: List[dict]) -> bool:
+    """Detecta empate de título explicado por tipos bibliográficos diferentes."""
+    item_types = {
+        (candidate.get('itemType') or '').strip()
+        for candidate in candidates
+        if candidate.get('itemType')
+    }
+    return len(item_types) > 1
+
+
 def select_parent_for_new_attachment(
     filename: str,
     parent_index: List[dict],
@@ -972,6 +1159,8 @@ def select_parent_for_new_attachment(
     ]
     if len(top_candidates) == 1:
         return top_candidates[0], candidates
+    if top_parent_candidates_are_different_item_types(top_candidates):
+        return None, []
     return None, candidates
 
 
@@ -981,6 +1170,9 @@ def bibliographic_duplicate_identity(entry: dict) -> tuple[str, str] | None:
     if doi:
         return ('doi', doi)
     title = entry.get('normalized_title') or ''
+    item_type = (entry.get('itemType') or '').strip()
+    if len(title) >= 20 and item_type:
+        return ('title+type', f"{item_type}:{title}")
     if len(title) >= 20:
         return ('title', title)
     return None
@@ -1226,6 +1418,99 @@ def merge_duplicate_metadata_into_keeper(
             keeper_item['data'] = data
         zot.update_item(data)
     return True
+
+
+def sanitize_zotero_update_payload(item_data: dict) -> dict:
+    """Remove campos somente leitura antes de chamar zot.update_item()."""
+    return {
+        key: value
+        for key, value in item_data.items()
+        if key not in ZOTERO_READONLY_UPDATE_FIELDS
+    }
+
+def record_current_review_duplicate(stats: dict, item_key: str) -> None:
+    """Registra item que ainda precisa manter tag de revisão nesta execução."""
+    if item_key:
+        stats.setdefault('current_review_duplicate_keys', set()).add(item_key)
+
+
+def remove_review_tag_from_item(
+    zot: zotero.Zotero,
+    item_key: str,
+    item: dict | None = None,
+    tag_name: str = REVIEW_DUPLICATE_TAG,
+) -> bool:
+    """Remove a tag de revisão quando o item deixou de bater como duplicado."""
+    if not item_key:
+        return False
+    try:
+        current_item = item if item and item.get("data") else zot.item(item_key)
+        item_data = dict(current_item.get("data") or current_item)
+        tags = list(item_data.get("tags") or [])
+        kept_tags = [
+            tag for tag in tags
+            if not (isinstance(tag, dict) and tag.get("tag") == tag_name)
+        ]
+        if len(kept_tags) == len(tags):
+            return False
+        item_data["tags"] = kept_tags
+        zot.update_item(sanitize_zotero_update_payload(item_data))
+        if item is not None:
+            item.setdefault("data", {})["tags"] = kept_tags
+        logging.info("[TAG] Item %s deixou de bater como duplicado; tag '%s' removida.", item_key, tag_name)
+        return True
+    except Exception as exc:
+        logging.warning("[TAG] Falha ao remover tag de revisão do item %s: %s", item_key, exc)
+        return False
+
+
+def clear_stale_review_duplicate_tags(
+    zot: zotero.Zotero,
+    parent_index: List[dict],
+    stats: dict,
+    tag_name: str = REVIEW_DUPLICATE_TAG,
+) -> None:
+    """Remove tags antigas dos itens que não foram marcados como risco nesta execução."""
+    current_keys = stats.setdefault('current_review_duplicate_keys', set())
+    stats.setdefault('review_tags_removed', 0)
+    for entry in parent_index:
+        item_key = entry.get('key')
+        if not item_key or item_key in current_keys:
+            continue
+        tags = ((entry.get('item') or {}).get('data') or {}).get('tags') or []
+        if not any(isinstance(tag, dict) and tag.get("tag") == tag_name for tag in tags):
+            continue
+        if remove_review_tag_from_item(zot, item_key, item=entry.get('item'), tag_name=tag_name):
+            stats['review_tags_removed'] += 1
+
+
+
+def add_review_tag_to_item(
+    zot: zotero.Zotero,
+    item_key: str,
+    reason: str,
+    item: dict | None = None,
+    tag_name: str = REVIEW_DUPLICATE_TAG,
+) -> bool:
+    """Marca um item Zotero para revisão manual de duplicidade."""
+    if not item_key:
+        return False
+    try:
+        current_item = item if item and item.get("data") else zot.item(item_key)
+        item_data = dict(current_item.get("data") or current_item)
+        tags = list(item_data.get("tags") or [])
+        if any(tag.get("tag") == tag_name for tag in tags if isinstance(tag, dict)):
+            return False
+        tags.append({"tag": tag_name})
+        item_data["tags"] = tags
+        zot.update_item(sanitize_zotero_update_payload(item_data))
+        if item is not None:
+            item.setdefault("data", {})["tags"] = tags
+        logging.info("[TAG] Item %s marcado com '%s' para revisão manual: %s", item_key, tag_name, reason)
+        return True
+    except Exception as exc:
+        logging.warning("[TAG] Falha ao marcar item %s para revisão manual: %s", item_key, exc)
+        return False
 
 
 def collect_all_pdfs(directory: str, stats: dict) -> List[str]:
@@ -1597,6 +1882,7 @@ def run_safe_bibliographic_duplicate_cleanup(
     stats.setdefault('auto_removed_bibliographic_duplicates', 0)
     stats.setdefault('auto_duplicate_cleanup_skipped', 0)
     stats.setdefault('merged_duplicate_metadata', 0)
+    stats.setdefault('review_tags_applied', 0)
 
     try:
         bibliographic_items = collect_all_bibliographic_items(zot, stats)
@@ -1657,6 +1943,14 @@ def run_safe_bibliographic_duplicate_cleanup(
             )
             if not can_delete:
                 stats['auto_duplicate_cleanup_skipped'] += 1
+                record_current_review_duplicate(stats, duplicate_key)
+                if add_review_tag_to_item(
+                    zot,
+                    duplicate_key,
+                    f"duplicata bibliográfica preservada: {reason}",
+                    item=duplicate.get('item'),
+                ):
+                    stats['review_tags_applied'] += 1
                 logging.warning(
                     "[DUP-BIB] Duplicata key=%s não removida: %s.",
                     duplicate_key,
@@ -2701,7 +2995,8 @@ def build_desktop_recognizer_xpi() -> bytes:
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for relative in ("manifest.json", "bootstrap.js"):
             source = ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_DIR / relative
-            archive.writestr(relative, source.read_text(encoding="utf-8"))
+            zinfo = zipfile.ZipInfo(relative, (2026, 1, 1, 0, 0, 0))
+            archive.writestr(zinfo, source.read_text(encoding="utf-8"))
     return buffer.getvalue()
 
 
@@ -2799,6 +3094,7 @@ def request_local_json(
 
 def ensure_zotero_desktop_connector_running() -> bool:
     """Garante que o Zotero Desktop esteja com o conector HTTP disponível."""
+    global _HEADLESS_ZOTERO_PROC
     status, _ = request_local_json(
         f"{ZOTERO_DESKTOP_CONNECTOR_URL}/connector/ping",
         timeout_seconds=3,
@@ -2808,14 +3104,16 @@ def ensure_zotero_desktop_connector_running() -> bool:
     if not ZOTERO_DESKTOP_BINARY:
         return False
     try:
-        subprocess.Popen(
-            [ZOTERO_DESKTOP_BINARY],
+        logging.info("[DESKTOP] Zotero fechado. Iniciando temporariamente no modo invisível (--headless)...")
+        _HEADLESS_ZOTERO_PROC = subprocess.Popen(
+            [ZOTERO_DESKTOP_BINARY, "--headless"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
     except OSError as exc:
-        logging.warning("[DESKTOP] Falha ao iniciar Zotero Desktop: %s", exc)
+        logging.warning("[DESKTOP] Falha ao iniciar Zotero Desktop em background: %s", exc)
         return False
+    
     deadline = time.monotonic() + ZOTERO_DESKTOP_START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         time.sleep(1)
@@ -2825,6 +3123,7 @@ def ensure_zotero_desktop_connector_running() -> bool:
         )
         if status == 200:
             return True
+    
     return False
 
 
@@ -2838,10 +3137,9 @@ def ensure_desktop_recognizer_available(stats: dict) -> bool:
     if not installed:
         return False
     if not ensure_zotero_desktop_connector_running():
-        logging.warning("[DESKTOP] Zotero Desktop indisponível. Reconhecimento de PDFs standalone será ignorado.")
         return False
 
-    deadline = time.monotonic() + (5 if changed else 1)
+    deadline = time.monotonic() + (15 if changed else 10)
     while time.monotonic() < deadline:
         status, _ = request_local_json(ZOTERO_DESKTOP_RECOGNIZER_PING_URL, timeout_seconds=3)
         if status == 200:
@@ -3204,8 +3502,8 @@ def build_drive_pdf_index(directory: str, stats: dict | None = None) -> tuple[di
         file_hash = compute_sha256(path)
         if not file_hash:
             if stats is not None:
-                stats['errors'] += 1
-            logging.warning("[ZOT->DRIVE] Não foi possível hashear arquivo do drive durante índice final: %s", path)
+                stats['recoverable_hash_skips'] += 1
+            logging.warning("[ZOT->DRIVE] Hash skip recuperável durante índice final: %s", path)
             continue
 
         try:
@@ -4754,8 +5052,109 @@ def preflight_checks() -> list[str]:
 
 
 
-def run_sync_mode():
+
+def ensure_single_instance() -> None:
+    """Garante que apenas uma instância do script rode usando fcntl lock."""
+    import fcntl
+    import tempfile
+    global _SINGLE_INSTANCE_LOCK_FD
+    if '_SINGLE_INSTANCE_LOCK_FD' in globals() and _SINGLE_INSTANCE_LOCK_FD is not None:
+        return
+        
+    lock_file = os.path.join(tempfile.gettempdir(), 'zotero_sync_webdav.lock')
+    try:
+        fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _SINGLE_INSTANCE_LOCK_FD = fd
+    except BlockingIOError:
+        logging.error("[SYSTEM] Outra instância do Zotero Sync já está em execução. Abortando.")
+        print("❌ Sincronização cancelada: Outra instância já está em execução.")
+        sys.exit(1)
+    except Exception as e:
+        logging.warning("[SYSTEM] Não foi possível criar arquivo de lock de instância: %s", e)
+
+def get_registered_folders(target_folder: str) -> dict[str, str]:
+    import json
+    state_file = os.path.join(target_folder, ".zotero_folders.json")
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def preprocess_drive_duplicate_folders(target_folder: str, stats: dict) -> None:
+    import shutil
+    logging.info("[DEDUP-FOLDER] Verificando pastas duplicadas no Drive...")
+    registered_folders = get_registered_folders(target_folder)
+    registered_paths = set(registered_folders.values())
+    
+    def _get_core_name(name: str) -> str:
+        import re
+        core = re.sub(r'^[A-Z]{2}\d{4}\s*-\s*', '', name)
+        core = re.sub(r'\s*\[.*?\]\s*$', '', core)
+        return normalize_aggressive(core)
+
+    for root, dirs, files in os.walk(target_folder, topdown=False):
+        if '.obsidian' in root or '.git' in root or 'trash' in root:
+            continue
+        groups = {}
+        for d in dirs:
+            if d.startswith('.'): continue
+            core = _get_core_name(d)
+            if core:
+                groups.setdefault(core, []).append(d)
+        for core, dup_dirs in groups.items():
+            if len(dup_dirs) > 1:
+                canon_dir = None
+                canon_score = -1
+                for d in dup_dirs:
+                    full_rel_path = relpath_from_root(target_folder, os.path.join(root, d))
+                    score = 0
+                    if full_rel_path in registered_paths:
+                        score += 1000
+                    pdf_count = len([f for f in os.listdir(os.path.join(root, d)) if f.lower().endswith('.pdf')])
+                    score += pdf_count
+                    if score > canon_score:
+                        canon_score = score
+                        canon_dir = d
+                if canon_dir:
+                    dup_dirs.remove(canon_dir)
+                    canon_full_path = os.path.join(root, canon_dir)
+                    for dup in dup_dirs:
+                        dup_full_path = os.path.join(root, dup)
+                        for item in os.listdir(dup_full_path):
+                            src_item = os.path.join(dup_full_path, item)
+                            dst_item = os.path.join(canon_full_path, item)
+                            if os.path.isfile(src_item) and item.lower().endswith('.pdf'):
+                                if not os.path.exists(dst_item):
+                                    shutil.move(src_item, dst_item)
+                                else:
+                                    src_hash = compute_sha256(src_item)
+                                    dst_hash = compute_sha256(dst_item)
+                                    if src_hash == dst_hash:
+                                        os.remove(src_item)
+                                    else:
+                                        base, ext = os.path.splitext(item)
+                                        shutil.move(src_item, os.path.join(canon_full_path, f"{base} (cópia){ext}"))
+                            elif os.path.isfile(src_item) and not os.path.exists(dst_item):
+                                shutil.move(src_item, dst_item)
+                        try:
+                            remaining = os.listdir(dup_full_path)
+                            if not remaining or all(f.startswith('.') for f in remaining):
+                                shutil.rmtree(dup_full_path)
+                                stats.setdefault('pruned_drive_duplicates', 0)
+                                stats['pruned_drive_duplicates'] += 1
+                        except Exception:
+                            pass
+
+def run_sync_mode(notification_policy: dict | None = None):
     """Executa a sincronização observando API do Zotero, drive montado e storage local."""
+    notification_policy = notification_policy or {"announce_start": False, "progress": False, "completion": True}
+    if notification_policy.get("announce_start"):
+        send_sync_progress_notification(build_first_open_sync_notification_body())
+    ensure_single_instance()
     configure_pyzotero_upload_transport()
     
     # 0. Preflight
@@ -4773,6 +5172,7 @@ def run_sync_mode():
         'added': 0,
         'skipped': 0,
         'errors': 0,
+        'recoverable_hash_skips': 0,
         'zotero_attachments_scanned': 0,
         'zotero_unique_filenames': 0,
         'folder_total_pdfs': 0,
@@ -4814,8 +5214,21 @@ def run_sync_mode():
         'blocked_drive_copy_variants': 0,
         'removed_empty_drive_dirs': 0,
         'removed_empty_obsidian_dirs': 0,
+        'moved_drive_files_to_collection': 0,
+        'review_tags_applied': 0,
+        'review_tags_removed': 0,
+        'current_review_duplicate_keys': set(),
     }
     tie_conflicts: list[dict[str, str]] = []
+
+
+    # 0.5. Deduplicação e renomeio PRÉVIO de Pastas e Arquivos do Drive
+    print("\nExecutando deduplicação e renomeio prévio no Drive...")
+    preprocess_drive_duplicate_folders(TARGET_FOLDER, stats)
+    
+    if os.path.isdir(TARGET_FOLDER):
+        _pre_files = collect_all_pdfs(TARGET_FOLDER, stats)
+        preprocess_drive_copy_variants(_pre_files, stats)
 
     # 1. Conectar ao Zotero
     try:
@@ -4971,16 +5384,12 @@ def run_sync_mode():
     try:
         files_to_process = collect_all_pdfs(TARGET_FOLDER, stats)
 
-        files_to_process = preprocess_drive_copy_variants(files_to_process, stats)
         if not files_to_process:
             print("Nenhum arquivo PDF encontrado na pasta.")
             finalize_execution(stats)
             return
 
-        if not files_to_process:
-            print("Nenhum arquivo PDF restante após a consolidação dos nomes de cópia.")
-            finalize_execution(stats)
-            return
+
         print(f"Encontrados {stats['folder_total_pdfs']} PDFs. Processando todos.")
 
         if not probe_pdf_content_read(files_to_process[0]):
@@ -5076,9 +5485,9 @@ def run_sync_mode():
                     webdav_hash = compute_sha256(file_path)
 
                     if not local_hash or not webdav_hash:
-                        stats['errors'] += 1
-                        logging.error(
-                            "[HASH] Falha ao comparar hashes de '%s' (local_hash=%s, webdav_hash=%s). Arquivo ignorado.",
+                        stats['recoverable_hash_skips'] += 1
+                        logging.warning(
+                            "[HASH] Falha recuperável ao comparar hashes de '%s' (local_hash=%s, webdav_hash=%s). Arquivo ignorado.",
                             file_name,
                             "ok" if local_hash else "falhou",
                             "ok" if webdav_hash else "falhou",
@@ -5117,9 +5526,9 @@ def run_sync_mode():
                     logging.info("[CASO 5] '%s' existe no Zotero mas sem cópia local. Copiando (key=%s).", relative_drive_path, zotero_key)
                     webdav_hash = compute_sha256(file_path)
                     if not webdav_hash:
-                        stats['errors'] += 1
-                        logging.error(
-                            "[HASH] Não foi possível obter hash de '%s' para recriar cópia local. Arquivo ignorado.",
+                        stats['recoverable_hash_skips'] += 1
+                        logging.warning(
+                            "[HASH] Falha recuperável ao obter hash de '%s' para recriar cópia local. Arquivo ignorado.",
                             file_name,
                         )
                         continue
@@ -5137,8 +5546,8 @@ def run_sync_mode():
             # Nome não encontrado — calcula hash para casos 3 e 4
             file_hash = compute_sha256(file_path)
             if not file_hash:
-                stats['errors'] += 1
-                logging.error("[HASH] Não foi possível obter hash de '%s'. Arquivo ignorado.", file_name)
+                stats['recoverable_hash_skips'] += 1
+                logging.warning("[HASH] Falha recuperável ao obter hash de '%s'. Arquivo ignorado.", file_name)
                 continue
 
             if DEBUG_DETAILED:
@@ -5319,13 +5728,21 @@ def run_sync_mode():
             if parent_candidates and not parent_match:
                 existing_filenames.pop(norm_local, None)
                 existing_filenames_aggressive.pop(norm_local_aggressive, None)
-                stats['errors'] += 1
                 stats['blocked_duplicate_risk'] += 1
                 candidate_summary = "; ".join(
                     f"{candidate['key']} score={candidate['score']:.2f} title='{candidate['title'][:90]}'"
                     for candidate in parent_candidates[:5]
                 )
-                logging.error(
+                for candidate in parent_candidates[:5]:
+                    record_current_review_duplicate(stats, candidate['key'])
+                    if add_review_tag_to_item(
+                        zot,
+                        candidate['key'],
+                        f"candidato ambíguo para anexo bloqueado: {file_name}",
+                        item=candidate.get('item'),
+                    ):
+                        stats['review_tags_applied'] += 1
+                logging.warning(
                     "[DUP-RISK] '%s' parece pertencer a mais de um item bibliográfico existente. "
                     "Upload bloqueado para não criar nova duplicata. Candidatos: %s",
                     file_name,
@@ -5336,9 +5753,8 @@ def run_sync_mode():
             if is_copy_variant_filename(file_name) and not parent_key:
                 existing_filenames.pop(norm_local, None)
                 existing_filenames_aggressive.pop(norm_local_aggressive, None)
-                stats['errors'] += 1
                 stats['blocked_duplicate_risk'] += 1
-                logging.error(
+                logging.warning(
                     "[DUP-RISK] '%s' tem marcador de cópia e não teve pai bibliográfico único. "
                     "Upload top-level bloqueado para evitar duplicata persistente no Zotero e no drive.",
                     file_name,
@@ -5362,7 +5778,7 @@ def run_sync_mode():
                 if not desktop_import_available:
                     existing_filenames.pop(norm_local, None)
                     existing_filenames_aggressive.pop(norm_local_aggressive, None)
-                    stats['errors'] += 1
+                    stats.setdefault('pending_desktop_imports', []).append(file_name)
                     logging.error(
                         "[DESKTOP] Importação bloqueada para '%s': Zotero Desktop/endpoint local indisponível. "
                         "O sync não fará fallback para upload via API porque isso consumiria a quota do Zotero.",
@@ -5469,6 +5885,13 @@ def run_sync_mode():
                 parent_items_by_key,
                 collection_by_key,
             )
+        try:
+            refreshed_bibliographic_items = collect_all_bibliographic_items(zot, stats)
+            refreshed_parent_index = build_bibliographic_parent_index(refreshed_bibliographic_items)
+            clear_stale_review_duplicate_tags(zot, refreshed_parent_index, stats)
+        except Exception as exc:
+            stats['errors'] += 1
+            logging.warning("[TAG] Falha ao limpar tags de revisão antigas: %s", exc)
 
         logging.info("[ZOT->DRIVE] Iniciando reconciliação Zotero -> drive para anexos ausentes.")
         drive_name_index, drive_aggressive_index, drive_path_index, drive_path_aggressive_index, drive_hash_index = build_drive_pdf_index(TARGET_FOLDER, stats)
@@ -5541,6 +5964,7 @@ def run_sync_mode():
 │ ⏭️  Existentes: {stats['skipped']} ({pct_ignorados:.1f}%) {' ' * (33 - len(str(stats['skipped']) + str(round(pct_ignorados,1))))}│
 │ 💾 Cópias locais: {stats['local_copies']:<34} │
 │ ❌ Erros: {stats['errors']} ({pct_erros:.1f}%) {' ' * (38 - len(str(stats['errors']) + str(round(pct_erros,1))))}│
+│ Hash skips recuperáveis: {stats['recoverable_hash_skips']:<20} │
 │ 🔁 Hash reaproveitados: {stats['hash_matches']:<23} │
 │ 🔄 Conteúdo atualizado: {stats['updated_content']:<23} │
 │ ✏️  Renomes WebDAV: {stats['renamed_webdav']:<27} │
@@ -5565,7 +5989,7 @@ def run_sync_mode():
 │ Pastas vazias remov. drive: {stats['removed_empty_drive_dirs']:<13} │
 │ Pastas vazias remov. Obsidian: {stats['removed_empty_obsidian_dirs']:<9} │
 │ 📤 Materializados no drive: {stats['materialized_drive']:<20} │
-│ ⚖️  Empates de mtime: {stats['mtime_ties']:<25} │
+│ Etiquetas de revisão: +{stats['review_tags_applied']:<9} -{stats['review_tags_removed']:<10} │
 │ 🛑 Bloqueios anti-duplicata: {stats['blocked_duplicate_risk']:<18} │
 │ 🧾 Grupos duplicados bib.: {stats['bibliographic_duplicate_groups']:<20} │
 │ 🧹 Duplicatas Zotero remov.: {stats['auto_removed_bibliographic_duplicates']:<17} │
@@ -5577,11 +6001,44 @@ def run_sync_mode():
 ✨ Processamento concluído!
 """
     print(summary)
-    finalize_execution(stats, summary)
+    finalize_execution(stats, summary, notify_completion=bool(notification_policy.get("completion", True)))
     
     # US-004: exit nonzero when critical errors occurred
     if stats.get('errors', 0) > 0:
         sys.exit(1)
+
+
+def is_zotero_running() -> bool:
+    """Detecta processo Zotero em execução."""
+    try:
+        for pid in filter(str.isdigit, os.listdir("/proc")):
+            try:
+                cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "ignore")
+            except OSError:
+                continue
+            if "zotero" in cmdline.lower():
+                return True
+    except OSError:
+        return False
+    return False
+
+def run_adaptive_sync() -> None:
+    """Roda sync enquanto Zotero estiver aberto, notificando só no primeiro ciclo."""
+    interval = get_env_int("ZOTERO_SYNC_INTERVAL_SECONDS", 300)
+    first = True
+    while is_zotero_running():
+        run_sync_mode(
+            notification_policy={
+                "announce_start": first,
+                "progress": first,
+                "completion": first,
+            }
+        )
+        if first:
+            time.sleep(interval)
+        first = False
+
+
 
 
 def main(argv: List[str] | None = None) -> int:
