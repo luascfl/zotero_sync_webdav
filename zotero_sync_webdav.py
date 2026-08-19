@@ -4887,6 +4887,201 @@ def run_obsidian_setup_mode(args: argparse.Namespace) -> None:
     )
     run_obsidian_apply_mode(apply_args)
     run_obsidian_mirror_mode(mirror_args)
+
+
+def run_bootstrap() -> None:
+    """Configura um PC Linux novo para sync automático do Zotero."""
+    import importlib
+
+    script_path = Path(__file__).resolve()
+    config_dir = Path.home() / ".config" / "zotero_sync_webdav"
+    env_file = config_dir / "zotero_sync.env"
+
+    print("=" * 60)
+    print("  BOOTSTRAP — Zotero Sync WebDAV")
+    print("=" * 60)
+    print()
+
+    # --- Step 1: System dependencies ---
+    print("1/6  Dependências do sistema")
+    print("-" * 40)
+    sys_deps = {
+        "python3": "Runtime Python",
+        "rclone": "Mount do Google Drive",
+        "pdftotext": "Preview de conteúdo de PDFs (poppler-utils)",
+        "zotero": "Zotero Desktop (headless import)",
+    }
+    missing_sys = []
+    for cmd, desc in sys_deps.items():
+        found = shutil.which(cmd)
+        if found:
+            print(f"  ✔ {cmd}: {found}")
+        else:
+            print(f"  ✗ {cmd}: NÃO ENCONTRADO — {desc}")
+            missing_sys.append(cmd)
+    if missing_sys:
+        print()
+        print("  Instale as dependências ausentes:")
+        apt_map = {"pdftotext": "poppler-utils", "rclone": "rclone"}
+        apt_pkgs = [apt_map.get(m, m) for m in missing_sys if m != "zotero"]
+        if apt_pkgs:
+            print(f"    sudo apt install {' '.join(apt_pkgs)}")
+        if "zotero" in missing_sys:
+            print("    Zotero: https://www.zotero.org/download/")
+            print("    Depois crie ~/.local/bin/zotero apontando para o binário")
+    print()
+
+    # --- Step 2: Python dependencies ---
+    print("2/6  Dependências Python")
+    print("-" * 40)
+    py_deps = ["pyzotero", "python-dotenv"]
+    missing_py = []
+    for pkg in py_deps:
+        mod_name = pkg.replace("-", "_")
+        try:
+            import_name = "dotenv" if pkg == "python-dotenv" else pkg
+            importlib.import_module(import_name)
+            print(f"  ✔ {pkg}")
+        except ImportError:
+            print(f"  ✗ {pkg}: NÃO INSTALADO")
+            missing_py.append(pkg)
+    if missing_py:
+        print()
+        print(f"    pip install {' '.join(missing_py)}")
+    print()
+
+    # --- Step 3: rclone mount ---
+    print("3/6  Mount do Google Drive (rclone)")
+    print("-" * 40)
+    rclone_svc = subprocess.run(
+        ["systemctl", "--user", "is-active", "rclone-google-drive.service"],
+        capture_output=True, text=True,
+    )
+    if rclone_svc.stdout.strip() == "active":
+        print("  ✔ rclone-google-drive.service: active")
+    else:
+        print("  ✗ rclone-google-drive.service: não encontrado ou inativo")
+        print()
+        print("  Para configurar:")
+        print("    1. rclone config  (criar remote 'Google Drive:')")
+        print("    2. Criar ~/.config/systemd/user/rclone-google-drive.service")
+        print("    3. systemctl --user enable --now rclone-google-drive.service")
+    drive_path = Path.home() / "Google Drive" / "zoterodb"
+    if drive_path.is_dir():
+        print(f"  ✔ Pasta do drive: {drive_path}")
+    else:
+        print(f"  ✗ Pasta do drive não encontrada: {drive_path}")
+    print()
+
+    # --- Step 4: .env / credentials ---
+    print("4/6  Credenciais Zotero (.env)")
+    print("-" * 40)
+    env_ok = True
+    if env_file.is_file():
+        print(f"  ✔ {env_file}")
+    elif Path(".env").is_file():
+        print(f"  ✔ .env local (projeto)")
+    else:
+        env_ok = False
+        print(f"  ✗ Nenhum .env encontrado")
+        print()
+        print("  Criando .env interativamente...")
+        try:
+            lib_id = input("    ZOTERO_LIBRARY_ID (número): ").strip()
+            api_key = input("    ZOTERO_API_KEY: ").strip()
+            target = input(
+                f"    Pasta de sync [{drive_path}]: "
+            ).strip() or str(drive_path)
+            config_dir.mkdir(parents=True, exist_ok=True)
+            env_content = (
+                f"ZOTERO_LIBRARY_ID={lib_id}\n"
+                f"ZOTERO_LIBRARY_TYPE=user\n"
+                f"ZOTERO_API_KEY={api_key}\n"
+                f'ZOTERO_SYNC_TARGET_FOLDER="{target}"\n'
+            )
+            env_file.write_text(env_content, encoding="utf-8")
+            print(f"  ✔ Salvo em {env_file}")
+            Path(".env").write_text(env_content, encoding="utf-8")
+            print(f"  ✔ Salvo em .env (local)")
+            env_ok = True
+        except EOFError:
+            print("  ✗ Entrada interrompida. Crie manualmente:")
+            print(f"    {env_file}")
+    print()
+
+    # --- Step 5: Validate Zotero API connection ---
+    print("5/6  Conexão com Zotero API")
+    print("-" * 40)
+    api_ok = False
+    if env_ok and not missing_py:
+        try:
+            from dotenv import load_dotenv as _ld
+            _ld(str(env_file) if env_file.is_file() else ".env")
+            from pyzotero import zotero as _z
+            _lib = os.environ.get("ZOTERO_LIBRARY_ID", "")
+            _key = os.environ.get("ZOTERO_API_KEY", "")
+            if _lib and _key:
+                # Silence httpx debug logs for the connection test
+                prev_level = logging.getLogger().getEffectiveLevel()
+                logging.getLogger().setLevel(logging.WARNING)
+                try:
+                    _zot = _z.Zotero(_lib, "user", _key)
+                    _zot.key_info()
+                finally:
+                    logging.getLogger().setLevel(prev_level)
+                print(f"  ✔ Conectado à biblioteca {_lib}")
+                api_ok = True
+            else:
+                print("  ✗ ZOTERO_LIBRARY_ID ou ZOTERO_API_KEY vazios")
+        except Exception as exc:
+            print(f"  ✗ Falha na conexão: {exc}")
+    else:
+        print("  ⏭️  Pulando (dependências ou .env ausentes)")
+    print()
+
+    # --- Step 6: Install systemd services ---
+    print("6/6  Serviços systemd (autostart)")
+    print("-" * 40)
+    timer_active = subprocess.run(
+        ["systemctl", "--user", "is-active", "zotero-sync.timer"],
+        capture_output=True, text=True,
+    ).stdout.strip() == "active"
+    if timer_active:
+        print("  ✔ zotero-sync.timer: active")
+    else:
+        print("  ✗ zotero-sync.timer: não instalado ou inativo")
+    watcher_ok = subprocess.run(
+        ["systemctl", "--user", "is-enabled", "zotero-sync-watch.service"],
+        capture_output=True, text=True,
+    ).stdout.strip() == "enabled"
+    if watcher_ok:
+        print("  ✔ zotero-sync-watch.service: enabled")
+    else:
+        print("  ✗ zotero-sync-watch.service: não instalado")
+
+    if not timer_active or not watcher_ok:
+        print()
+        if api_ok:
+            print("  Instalando serviços...")
+            run_setup_autostart_mode([])
+        else:
+            print("  Resolva os passos anteriores e rode:")
+            print(f"    python3 {script_path.name} setup-autostart")
+    print()
+
+    # --- Summary ---
+    print("=" * 60)
+    all_ok = not missing_sys and not missing_py and env_ok and api_ok and timer_active
+    if all_ok:
+        print("  ✅ Tudo configurado! O Zotero sincroniza sozinho em segundo plano.")
+        print()
+        print("  Para replicar num outro PC:")
+        print(f"    1. git clone <repo>")
+        print(f"    2. cd zotero_sync_webdav")
+        print(f"    3. python3 {script_path.name} bootstrap")
+    else:
+        print("  ⚠️  Há itens pendentes acima. Resolva e rode bootstrap novamente.")
+    print("=" * 60)
 def build_cli_parser() -> argparse.ArgumentParser:
     """Constrói a CLI unificada do workflow Zotero/WebDAV."""
     parser = argparse.ArgumentParser(
@@ -4978,6 +5173,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help='Recupera PDFs órfãos do Zotero que faltam no drive',
     )
     recovery_parser.add_argument('--dry-run', action='store_true', help='Simula sem materializar')
+
+    subparsers.add_parser(
+        'bootstrap',
+        help='Configura um PC Linux novo: verifica dependências, cria .env, instala serviços systemd',
+    )
 
     return parser
 
@@ -6124,6 +6324,9 @@ def main(argv: List[str] | None = None) -> int:
         return
     if args.command == 'recover-orphans':
         run_recover_orphans_mode(dry_run=args.dry_run)
+        return
+    if args.command == 'bootstrap':
+        run_bootstrap()
         return
 
 
