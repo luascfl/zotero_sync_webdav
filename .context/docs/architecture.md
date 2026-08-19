@@ -28,7 +28,7 @@ The Google Drive directory (`zoterodb`) serves concurrently as the Zotero physic
 - The script enforces Zotero's collection structure onto the Drive directory, organizing PDFs into collection folders.
 - Obsidian reads this identical folder structure natively.
 - Zotero exclusively manages the `.pdf` attachments. Obsidian manages the `.md` notes. The script strictly filters for `.pdf` files, actively ignoring Markdown notes and the `.obsidian` configuration folder, preventing pollution of the Zotero bibliographic database.
-
+- **Vault Synchronization:** The vault (`zoterodb`) is synced directly to Google Drive via Obsidian's **Remotely Save** plugin. This plugin manages the upload/download of all vault contents (including PDFs placed by the Zotero script and Markdown notes), removing the need for a separate OS-level mount (like Koofr or rclone) for Obsidian sync. Use `obsidian-setup` to configure Obsidian to use `zoterodb` as the vault and set up Remotely Save.
 ## Detected design patterns
 | Pattern | Confidence | Locations | Description |
 | --- | ---: | --- | --- |

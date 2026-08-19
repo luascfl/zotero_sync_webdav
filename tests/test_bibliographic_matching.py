@@ -30,12 +30,13 @@ def make_item(
     date="",
     creators=None,
     date_added="2025-01-01T00:00:00Z",
+    item_type="journalArticle",
 ):
     return {
         "key": key,
         "data": {
             "key": key,
-            "itemType": "journalArticle",
+            "itemType": item_type,
             "title": title,
             "DOI": doi,
             "date": date,
@@ -120,6 +121,37 @@ class BibliographicMatchingTests(unittest.TestCase):
 
         self.assertIsNone(parent)
         self.assertEqual({candidate["key"] for candidate in candidates}, {"AWKA6AM8", "YUV3E6U5"})
+
+    def test_roman_numeral_series_titles_do_not_match_other_parts(self):
+        title_i = "O processo de ensinagem no grau superior I"
+        title_ii = "O processo de ensinagem no grau superior II"
+        index = zsync.build_bibliographic_parent_index([
+            make_item("PART1", title_i),
+        ])
+
+        parent, candidates = zsync.select_parent_for_new_attachment(
+            "O processo de ensinagem no grau superior II.pdf",
+            index,
+        )
+
+        self.assertIsNone(parent)
+        self.assertEqual(candidates, [])
+        self.assertEqual(zsync.title_match_score(title_ii, title_i), 0.0)
+
+    def test_same_title_with_different_item_types_is_not_duplicate_risk(self):
+        title = "O que é a Psicologia"
+        index = zsync.build_bibliographic_parent_index([
+            make_item("BOOK0001", title, item_type="book", date_added="2025-11-02T20:12:21Z"),
+            make_item("SLIDE001", title, item_type="presentation", date_added="2026-05-08T18:21:40Z"),
+        ])
+
+        parent, candidates = zsync.select_parent_for_new_attachment(
+            "O que é a Psicologia.pdf",
+            index,
+        )
+
+        self.assertIsNone(parent)
+        self.assertEqual(candidates, [])
 
     def test_leading_author_year_filename_can_match_book_title(self):
         index = zsync.build_bibliographic_parent_index([
@@ -283,22 +315,6 @@ class BibliographicMatchingTests(unittest.TestCase):
         )
         self.assertEqual(key, "CHILD")
 
-    def test_collect_obsidian_ingest_candidates_filters_by_collection_dirs(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            (root / ".obsidian").mkdir()
-            tracked_dir = root / "UNEB Psicologia 2025.2"
-            tracked_dir.mkdir()
-            (tracked_dir / "artigo.pdf").write_bytes(b"pdf")
-            unrelated_dir = root / "Outros"
-            unrelated_dir.mkdir()
-            (unrelated_dir / "fora.pdf").write_bytes(b"pdf")
-            candidates = zsync.collect_obsidian_ingest_candidates(
-                root,
-                {"uneb psicologia 2025.2": "COL1"},
-            )
-            self.assertEqual(len(candidates), 1)
-            self.assertEqual(candidates[0]["collection_key"], "COL1")
 
     def test_hash_match_selection_prefers_metadata_name_matching_drive(self):
         parent_a = make_item(
@@ -426,6 +442,17 @@ class BibliographicMatchingTests(unittest.TestCase):
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["identity"], ("doi", "10.123/abc"))
         self.assertEqual({item["key"] for item in groups[0]["items"]}, {"OLDITEM1", "NEWITEM2"})
+
+    def test_title_only_duplicate_groups_are_separated_by_item_type(self):
+        title = "O que é a Psicologia"
+        index = zsync.build_bibliographic_parent_index([
+            make_item("BOOK0001", title, item_type="book"),
+            make_item("SLIDE001", title, item_type="presentation"),
+        ])
+
+        groups = zsync.build_bibliographic_duplicate_groups(index)
+
+        self.assertEqual(groups, [])
 
     def test_duplicate_cleanup_keeper_prefers_pdf_over_empty_older_item(self):
         older = {"key": "OLD", "dateAdded": "2024-01-01T00:00:00Z"}
@@ -564,6 +591,57 @@ class BibliographicMatchingTests(unittest.TestCase):
         self.assertEqual(zot.updated, [keeper_item["data"]])
         self.assertEqual(keeper_item["data"]["relations"]["dc:relation"], ["existing", "new"])
         self.assertEqual(keeper_item["data"]["relations"]["dc:replaces"], "old")
+
+    def test_stale_review_duplicate_tag_is_removed_when_item_no_longer_matches(self):
+        class FakeZotero:
+            def __init__(self):
+                self.updated = []
+
+            def update_item(self, item):
+                self.updated.append(item)
+
+        item = make_item("BOOK0001", "O que é a Psicologia", item_type="book")
+        item["data"]["tags"] = [
+            {"tag": zsync.REVIEW_DUPLICATE_TAG},
+            {"tag": "preservar"},
+        ]
+        stats = {
+            "current_review_duplicate_keys": set(),
+            "review_tags_removed": 0,
+        }
+
+        zsync.clear_stale_review_duplicate_tags(
+            FakeZotero(),
+            zsync.build_bibliographic_parent_index([item]),
+            stats,
+        )
+
+        self.assertEqual(item["data"]["tags"], [{"tag": "preservar"}])
+        self.assertEqual(stats["review_tags_removed"], 1)
+
+    def test_current_review_duplicate_tag_is_preserved(self):
+        class FakeZotero:
+            def __init__(self):
+                self.updated = []
+
+            def update_item(self, item):
+                self.updated.append(item)
+
+        item = make_item("BOOK0001", "O que é a Psicologia", item_type="book")
+        item["data"]["tags"] = [{"tag": zsync.REVIEW_DUPLICATE_TAG}]
+        stats = {
+            "current_review_duplicate_keys": {"BOOK0001"},
+            "review_tags_removed": 0,
+        }
+
+        zsync.clear_stale_review_duplicate_tags(
+            FakeZotero(),
+            zsync.build_bibliographic_parent_index([item]),
+            stats,
+        )
+
+        self.assertEqual(item["data"]["tags"], [{"tag": zsync.REVIEW_DUPLICATE_TAG}])
+        self.assertEqual(stats["review_tags_removed"], 0)
 
     def test_unsafe_duplicate_child_classifies_highlight_annotation(self):
         detail = zsync.classify_unsafe_duplicate_child({

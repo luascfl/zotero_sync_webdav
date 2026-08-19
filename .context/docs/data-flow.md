@@ -32,8 +32,7 @@ The main data path starts with local configuration, then combines Zotero attachm
 - Zotero API: attachment listing, attachment creation, item lookup, item update, and deletion in the cleanup script.
 - Mounted WebDAV directory: local filesystem interface to the sync source.
 - Local Zotero storage: local copy and hash comparison target.
-- Obsidian vault: Lives natively at the Google Drive target root (`zoterodb`). No separate physical mirroring step is necessary since the script enforces Zotero collections directly onto the drive structure, which Obsidian reads.
-
+- Obsidian vault: Lives natively at the Google Drive target root (`zoterodb`). No separate physical mirroring step is necessary since the script enforces Zotero collections directly onto the drive structure, which Obsidian reads. Synchronization of the vault to Google Drive is handled by Obsidian's **Remotely Save** plugin, abstracting away the need for OS-level sync mechanisms for the Markdown side.
 ## Data entities
 - Attachment item: Zotero API item with `key`, `data.filename`, `data.path`, `data.dateAdded`, and optional `data.parentItem`.
 - WebDAV PDF: local file path, basename, mtime, size, and SHA-256 hash.

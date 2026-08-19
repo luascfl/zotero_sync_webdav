@@ -185,6 +185,18 @@
         "Add unit tests for the recovery logic.",
         "The quality gates pass."
       ]
+    },
+    {
+      "id": "US-007",
+      "title": "Add test coverage for folder deduplication and single-instance locks",
+      "status": "done",
+      "dependsOn": [],
+      "description": "As a maintainer, I want the recently added folder deduplication and single-instance lock features to be covered by unit tests to prevent silent regressions.",
+      "acceptanceCriteria": [
+        "Add unit tests for preprocess_drive_duplicate_folders covering identical and missing PDFs.",
+        "Add unit tests for ensure_single_instance covering successful lock acquisition and lock collision.",
+        "The quality gates pass."
+      ]
     }
   ]
 }
