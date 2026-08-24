@@ -9,13 +9,20 @@ function respondJSON(sendResponseCallback, status, payload) {
 }
 
 async function getItemByLibraryAndKey(libraryID, key) {
+	let item;
 	if (Zotero.Items.getByLibraryAndKeyAsync) {
-		return Zotero.Items.getByLibraryAndKeyAsync(libraryID, key);
+		item = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, key);
 	}
-	if (Zotero.Items.getByLibraryAndKey) {
-		return Zotero.Items.getByLibraryAndKey(libraryID, key);
+	else if (Zotero.Items.getByLibraryAndKey) {
+		item = Zotero.Items.getByLibraryAndKey(libraryID, key);
 	}
-	throw new Error("Zotero.Items.getByLibraryAndKeyAsync indisponível");
+	else {
+		throw new Error("Zotero.Items.getByLibraryAndKeyAsync indisponível");
+	}
+	if (item && Zotero.Items.getAsync) {
+		return Zotero.Items.getAsync(item.id);
+	}
+	return item;
 }
 
 async function getItemByID(itemID) {
@@ -93,16 +100,14 @@ async function createFallbackParent(item) {
 	await parentItem.saveTx();
 
 	let collections = item.getCollections();
-	await Zotero.DB.executeTransaction(async function () {
-		if (collections.length) {
-			for (let collectionID of collections) {
-				parentItem.addToCollection(collectionID);
-			}
-			await parentItem.save();
+	if (collections.length) {
+		for (let collectionID of collections) {
+			parentItem.addToCollection(collectionID);
 		}
-		item.parentID = parentItem.id;
-		await item.save();
-	});
+		await parentItem.saveTx();
+	}
+	item.parentID = parentItem.id;
+	await item.saveTx();
 	return parentItem;
 }
 
@@ -206,23 +211,30 @@ async function importAttachment(payload) {
 	}
 
 	let attachment = await Zotero.Attachments.importFromFile(options);
-	let latestAttachment = await getItemByLibraryAndKey(libraryID, attachment.key);
 	let result = {
 		attachmentKey: attachment.key,
-		attachmentTitle: latestAttachment ? latestAttachment.getField("title") : "",
-		attachmentFilename: latestAttachment ? latestAttachment.attachmentFilename : "",
+		attachmentTitle: attachment.getField("title"),
+		attachmentFilename: attachment.attachmentFilename || "",
 		parentKey: parentItem ? parentItem.key : "",
 		parentTitle: parentItem ? parentItem.getField("title") : "",
 		fallbackParents: [],
+		fallbackPending: false,
 	};
 
-	if (!parentItem && autoRecognize && Zotero.RecognizeDocument.canRecognize(attachment)) {
+	if (!parentItem && !autoRecognize) {
+		// Em --headless, consultar o item imediatamente após importFromFile pode
+		// bloquear a transação do Zotero. A próxima sincronização o reconhece
+		// quando o item já estiver totalmente materializado.
+		log("Importação headless concluída; pai fallback pendente: " + attachment.key);
+		result.fallbackPending = true;
+	}
+	else if (!parentItem && Zotero.RecognizeDocument.canRecognize(attachment)) {
 		await Zotero.RecognizeDocument.recognizeItems([attachment]);
 		result.fallbackParents = await postRecognizeFallback(libraryID, [attachment]);
-		latestAttachment = await getItemByLibraryAndKey(libraryID, attachment.key);
-		result.attachmentTitle = latestAttachment ? latestAttachment.getField("title") : result.attachmentTitle;
-		result.attachmentFilename = latestAttachment ? latestAttachment.attachmentFilename : result.attachmentFilename;
 		if (result.fallbackParents.length) {
+			let latestAttachment = await getItemByLibraryAndKey(libraryID, attachment.key);
+			result.attachmentTitle = latestAttachment ? latestAttachment.getField("title") : result.attachmentTitle;
+			result.attachmentFilename = latestAttachment ? latestAttachment.attachmentFilename : result.attachmentFilename;
 			result.parentKey = result.fallbackParents[0].parentKey;
 			result.parentTitle = result.fallbackParents[0].parentTitle;
 		}
@@ -252,6 +264,7 @@ function installEndpoints() {
 				try {
 					let payload = parsePayload(postData);
 					let libraryID = payload.libraryID || Zotero.Libraries.userLibraryID;
+					let autoRecognize = payload.autoRecognize !== false;
 					let itemKeys = Array.isArray(payload.itemKeys) ? payload.itemKeys : [];
 					let items = [];
 					let skipped = [];
@@ -269,7 +282,7 @@ function installEndpoints() {
 						items.push(item);
 					}
 
-					if (items.length) {
+					if (autoRecognize && items.length) {
 						await Zotero.RecognizeDocument.recognizeItems(items);
 					}
 

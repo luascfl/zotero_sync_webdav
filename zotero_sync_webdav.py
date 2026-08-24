@@ -246,6 +246,35 @@ def get_env_bool(name: str, default: bool) -> bool:
     return default
 
 
+def resolve_desktop_recognizer_plugin_dir(
+    script_dir: Path,
+    shared_data_dir: Path | None = None,
+    configured_dir: str | None = None,
+) -> Path:
+    """Resolve os assets do plugin tanto no checkout quanto na instalação do usuário."""
+    shared_data_dir = shared_data_dir or Path.home() / ".local" / "share" / "zotero_sync_webdav"
+    candidates = [
+        Path(configured_dir).expanduser() if configured_dir else None,
+        script_dir / "zotero_sync_recognizer",
+        shared_data_dir / "zotero_sync_recognizer",
+    ]
+    for candidate in candidates:
+        if candidate and candidate.is_dir():
+            return candidate
+    return script_dir / "zotero_sync_recognizer"
+
+
+def stage_desktop_recognizer_assets() -> Path | None:
+    """Instala os assets do plugin em local estável para o script copiado em ~/.local/bin."""
+    source = SCRIPT_DIR / "zotero_sync_recognizer"
+    destination = Path.home() / ".local" / "share" / "zotero_sync_webdav" / "zotero_sync_recognizer"
+    if not source.is_dir():
+        return None
+    if source.resolve() != destination.resolve():
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+    return destination
+
+
 
 
 HASH_READ_TIMEOUT_SECONDS = get_env_int(
@@ -268,7 +297,10 @@ ZOTERO_DESKTOP_CONNECTOR_URL = os.environ.get(
     "http://127.0.0.1:23119",
 ).rstrip("/")
 ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_ID = "zotero-sync-recognizer@example.com"
-ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_DIR = SCRIPT_DIR / "zotero_sync_recognizer"
+ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_DIR = resolve_desktop_recognizer_plugin_dir(
+    SCRIPT_DIR,
+    configured_dir=os.environ.get("ZOTERO_DESKTOP_RECOGNIZER_PLUGIN_DIR"),
+)
 ZOTERO_DESKTOP_RECOGNIZER_PING_URL = (
     f"{ZOTERO_DESKTOP_CONNECTOR_URL}/zoteroSyncRecognize/ping"
 )
@@ -2347,6 +2379,7 @@ SETUP_AUTOSTART_SHELL = '#!/usr/bin/env bash\n#\n# Configura a montagem WebDAV e
 def run_setup_autostart_mode(extra_args: List[str]) -> None:
     """Executa o configurador de autostart integrado sem depender de arquivo separado."""
     import tempfile
+    stage_desktop_recognizer_assets()
 
     with tempfile.TemporaryDirectory(prefix="zsw-autostart-") as temp_dir:
         temp_script = Path(temp_dir) / 'setup_autostart.sh'
@@ -2765,6 +2798,24 @@ def build_local_storage_index(existing_filenames: Dict[str, dict]) -> Tuple[Dict
         key_to_path[key] = local_file
 
     return hash_index, key_to_path
+
+def build_unindexed_local_storage_hashes(indexed_paths: dict[str, str]) -> set[str]:
+    """Localiza anexos recém-importados que ainda não chegaram à API do Zotero."""
+    indexed = {os.path.realpath(path) for path in indexed_paths.values()}
+    hashes: set[str] = set()
+    if not os.path.isdir(LOCAL_COPY_DIR):
+        return hashes
+
+    for entry in os.scandir(LOCAL_COPY_DIR):
+        if not entry.is_dir():
+            continue
+        local_file = get_latest_pdf_path(entry.path)
+        if not local_file or os.path.realpath(local_file) in indexed:
+            continue
+        file_hash = compute_sha256(local_file)
+        if file_hash:
+            hashes.add(file_hash)
+    return hashes
 
 
 def rename_webdav_file(src_path: str, desired_name: str) -> str:
@@ -5179,6 +5230,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help='Configura um PC Linux novo: verifica dependências, cria .env, instala serviços systemd',
     )
 
+    subparsers.add_parser(
+        'watch-zotero',
+        help='Serviço residente que dispara o sync quando o Zotero é aberto',
+    )
+
     return parser
 
 
@@ -5608,6 +5664,7 @@ def run_sync_mode(notification_policy: dict | None = None):
 
 
     hash_index, key_to_path = build_local_storage_index(existing_filenames)
+    unindexed_local_hashes = build_unindexed_local_storage_hashes(key_to_path)
     drive_name_index_fast, drive_aggressive_index_fast, drive_path_index_fast, drive_path_aggressive_index_fast = build_drive_name_path_indexes(TARGET_FOLDER)
     reconcile_drive_collection_paths(
         zot,
@@ -5805,6 +5862,15 @@ def run_sync_mode(notification_policy: dict | None = None):
                     "[LOCAL] arquivo='%s' | norm='%s' | norm_agg='%s' | hash=%s",
                     file_name, norm_local, norm_local_aggressive, file_hash,
                 )
+            if file_hash in unindexed_local_hashes:
+                logging.info(
+                    "[CASO 4] '%s' já foi importado no storage local e aguarda sincronização da API. "
+                    "Ignorando para não criar uma cópia duplicada.",
+                    relative_drive_path,
+                )
+                stats['skipped'] += 1
+                continue
+
 
             hash_matches = hash_index.get(file_hash, [])
             if hash_matches:
@@ -6040,7 +6106,7 @@ def run_sync_mode(notification_policy: dict | None = None):
                     file_path,
                     drive_collection_key,
                     parent_key=parent_key,
-                    auto_recognize=not parent_key,
+                    auto_recognize=not parent_key and _HEADLESS_ZOTERO_PROC is None,
                 )
                 if not desktop_result:
                     existing_filenames.pop(norm_local, None)
@@ -6259,14 +6325,15 @@ def run_sync_mode(notification_policy: dict | None = None):
 
 
 def is_zotero_running() -> bool:
-    """Detecta processo Zotero em execução."""
+    """Detecta processo Zotero em execução (ignora headless e o próprio script)."""
     try:
         for pid in filter(str.isdigit, os.listdir("/proc")):
             try:
                 cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "ignore")
             except OSError:
                 continue
-            if "zotero" in cmdline.lower():
+            # Must contain zotero-bin or be the main zotero app, but not our script and not headless
+            if "zotero" in cmdline.lower() and "zotero_sync" not in cmdline.lower() and "--headless" not in cmdline.lower():
                 return True
     except OSError:
         return False
@@ -6284,9 +6351,9 @@ def run_adaptive_sync() -> None:
                 "completion": first,
             }
         )
-        if first:
-            time.sleep(interval)
         first = False
+        # Sleep between iterations, not just after the first
+        time.sleep(interval)
 
 
 
@@ -6328,6 +6395,34 @@ def main(argv: List[str] | None = None) -> int:
     if args.command == 'bootstrap':
         run_bootstrap()
         return
+    if args.command == 'watch-zotero':
+        run_zotero_open_watch()
+        return
+
+
+def run_zotero_open_watch() -> None:
+    """Serviço residente que dispara o sync assim que o Zotero é aberto."""
+    import subprocess
+    logging.info("[WATCHER] Watcher de abertura do Zotero iniciado.")
+    was_running = is_zotero_running()
+    
+    while True:
+        is_running = is_zotero_running()
+        
+        if is_running and not was_running:
+            logging.info("[WATCHER] Zotero aberto detectado. Disparando sync imediata.")
+            try:
+                subprocess.Popen(
+                    ["python3", str(Path(__file__).resolve()), "sync"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                logging.error("[WATCHER] Falha ao disparar sync: %s", exc)
+                
+        was_running = is_running
+        time.sleep(5)
 
 
     parser.error(f'Comando não suportado: {args.command}')

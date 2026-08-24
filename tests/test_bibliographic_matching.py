@@ -719,6 +719,15 @@ class BibliographicMatchingTests(unittest.TestCase):
         self.assertIn("createFallbackParent", bootstrap)
         self.assertIn("fallbackParents", bootstrap)
 
+    def test_desktop_recognizer_can_create_fallback_without_metadata_recognition(self):
+        bootstrap = Path("zotero_sync_recognizer/bootstrap.js").read_text(encoding="utf-8")
+        self.assertIn("payload.autoRecognize !== false", bootstrap)
+        self.assertIn("if (autoRecognize && items.length)", bootstrap)
+        self.assertIn("let items = [];", bootstrap)
+        self.assertIn("return Zotero.Items.getAsync(item.id);", bootstrap)
+        self.assertIn("fallbackPending: false", bootstrap)
+        self.assertIn("result.fallbackPending = true;", bootstrap)
+
 
     def test_sync_item_collections_to_drive_collection_replaces_managed_subset(self):
         class FakeZotero:
