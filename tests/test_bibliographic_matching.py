@@ -727,6 +727,7 @@ class BibliographicMatchingTests(unittest.TestCase):
         self.assertIn("return Zotero.Items.getAsync(item.id);", bootstrap)
         self.assertIn("fallbackPending: false", bootstrap)
         self.assertIn("result.fallbackPending = true;", bootstrap)
+        self.assertIn("discardStandaloneAttachment", bootstrap)
 
 
     def test_sync_item_collections_to_drive_collection_replaces_managed_subset(self):

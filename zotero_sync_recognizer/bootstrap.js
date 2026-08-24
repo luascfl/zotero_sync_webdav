@@ -243,10 +243,21 @@ async function importAttachment(payload) {
 	return result;
 }
 
+async function discardStandaloneAttachment(payload) {
+	let libraryID = payload.libraryID || Zotero.Libraries.userLibraryID;
+	let item = await getItemByLibraryAndKey(libraryID, payload.itemKey || "");
+	if (!item || !item.isAttachment() || !item.isTopLevelItem()) {
+		throw new Error("Somente anexos standalone podem ser descartados");
+	}
+	await item.eraseTx();
+	return { discarded: item.key };
+}
+
 function installEndpoints() {
 	var pingPath = "/zoteroSyncRecognize/ping";
 	var recognizePath = "/zoteroSyncRecognize/recognize";
 	var importPath = "/zoteroSyncRecognize/import";
+	var discardPath = "/zoteroSyncRecognize/discard";
 
 	var PingEndpoint = Zotero.Server.Endpoints[pingPath] = function () {};
 	PingEndpoint.prototype = {
@@ -326,7 +337,26 @@ function installEndpoints() {
 		}
 	};
 
-	ENDPOINTS = [pingPath, recognizePath, importPath];
+	var DiscardEndpoint = Zotero.Server.Endpoints[discardPath] = function () {};
+	DiscardEndpoint.prototype = {
+		supportedMethods: ["POST"],
+		init: function (postData, sendResponseCallback) {
+			(async () => {
+				try {
+					let result = await discardStandaloneAttachment(parsePayload(postData));
+					respondJSON(sendResponseCallback, 200, result);
+				}
+				catch (e) {
+					Zotero.logError(e);
+					respondJSON(sendResponseCallback, 500, {
+						error: e && e.message ? e.message : String(e),
+					});
+				}
+			})();
+		}
+	};
+
+	ENDPOINTS = [pingPath, recognizePath, importPath, discardPath];
 }
 
 function removeEndpoints() {

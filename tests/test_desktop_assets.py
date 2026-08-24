@@ -30,6 +30,52 @@ class DesktopRecognizerAssetsTests(unittest.TestCase):
 
         self.assertEqual(resolved, shared / "zotero_sync_recognizer")
 
+    def test_resolves_local_binary_when_systemd_path_omits_zotero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            local_binary = home / ".local" / "bin" / "zotero"
+            local_binary.parent.mkdir(parents=True)
+            local_binary.touch()
+
+            resolved = zsync.resolve_zotero_desktop_binary(
+                configured_binary=None,
+                path_binary=None,
+                home_dir=home,
+            )
+
+        self.assertEqual(resolved, str(local_binary))
+
+    def test_prefers_explicit_desktop_binary(self):
+        self.assertEqual(
+            zsync.resolve_zotero_desktop_binary(
+                configured_binary="/opt/zotero/zotero",
+                path_binary="/usr/bin/zotero",
+            ),
+            "/opt/zotero/zotero",
+        )
+
+    def test_profile_root_is_available_to_plugin_installer(self):
+        self.assertEqual(
+            zsync.ZOTERO_PROFILE_ROOT,
+            Path.home() / ".zotero" / "zotero",
+        )
+
+    def test_stages_import_file_on_local_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "mounted" / "source.pdf"
+            source.parent.mkdir()
+            source.write_bytes(b"pdf-content")
+
+            staged = zsync.stage_file_for_desktop_import(
+                str(source),
+                staging_dir=root / "staging",
+            )
+
+            self.assertNotEqual(staged, source)
+            self.assertEqual(staged.name, source.name)
+            self.assertEqual(staged.read_bytes(), b"pdf-content")
+
 
 if __name__ == "__main__":
     unittest.main()

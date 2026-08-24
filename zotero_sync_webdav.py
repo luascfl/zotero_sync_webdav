@@ -275,6 +275,20 @@ def stage_desktop_recognizer_assets() -> Path | None:
     return destination
 
 
+def resolve_zotero_desktop_binary(
+    configured_binary: str | None = None,
+    path_binary: str | None = None,
+    home_dir: Path | None = None,
+) -> str:
+    """Resolve o binário do Zotero também no PATH reduzido de serviços systemd."""
+    if configured_binary:
+        return configured_binary
+    if path_binary:
+        return path_binary
+    local_binary = (home_dir or Path.home()) / ".local" / "bin" / "zotero"
+    return str(local_binary) if local_binary.is_file() else ""
+
+
 
 
 HASH_READ_TIMEOUT_SECONDS = get_env_int(
@@ -291,7 +305,10 @@ PYZOTERO_UPLOAD_TIMEOUT_SECONDS = get_env_int(
 )
 
 ZOTERO_PROFILE_ROOT = Path.home() / ".zotero" / "zotero"
-ZOTERO_DESKTOP_BINARY = os.environ.get("ZOTERO_DESKTOP_BINARY") or shutil.which("zotero") or ""
+ZOTERO_DESKTOP_BINARY = resolve_zotero_desktop_binary(
+    os.environ.get("ZOTERO_DESKTOP_BINARY"),
+    shutil.which("zotero"),
+)
 ZOTERO_DESKTOP_CONNECTOR_URL = os.environ.get(
     "ZOTERO_DESKTOP_CONNECTOR_URL",
     "http://127.0.0.1:23119",
@@ -3254,6 +3271,27 @@ def ensure_desktop_recognizer_available(stats: dict) -> bool:
     return False
 
 
+def stage_file_for_desktop_import(
+    file_path: str,
+    staging_dir: Path | None = None,
+) -> Path:
+    """Copia o PDF do mount para disco local antes de entregá-lo ao Zotero headless."""
+    source = Path(file_path)
+    if not source.is_file():
+        raise FileNotFoundError(source)
+
+    destination_dir = staging_dir or Path(LOG_DIR) / "desktop-import-staging"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    stage_dir = Path(tempfile.mkdtemp(prefix="zotero-import-", dir=destination_dir))
+    destination = stage_dir / source.name
+    try:
+        shutil.copyfile(source, destination)
+    except Exception:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        raise
+    return destination
+
+
 def import_attachment_via_desktop(
     file_path: str,
     collection_key: str | None,
@@ -3261,16 +3299,21 @@ def import_attachment_via_desktop(
     auto_recognize: bool = True,
 ) -> dict | None:
     """Importa anexo pelo Zotero Desktop para respeitar o backend WebDAV configurado."""
-    status, payload = request_local_json(
-        ZOTERO_DESKTOP_RECOGNIZER_IMPORT_URL,
-        payload={
-            "filePath": os.path.abspath(file_path),
-            "parentKey": parent_key or "",
-            "collectionKey": collection_key or "",
-            "autoRecognize": auto_recognize,
-        },
-        timeout_seconds=max(60, ZOTERO_DESKTOP_RECOGNIZE_TIMEOUT_SECONDS),
-    )
+    staged_path = stage_file_for_desktop_import(file_path)
+    try:
+        status, payload = request_local_json(
+            ZOTERO_DESKTOP_RECOGNIZER_IMPORT_URL,
+            payload={
+                "filePath": str(staged_path),
+                "parentKey": parent_key or "",
+                "collectionKey": collection_key or "",
+                "autoRecognize": auto_recognize,
+            },
+            timeout_seconds=180,
+        )
+    finally:
+        shutil.rmtree(staged_path.parent, ignore_errors=True)
+
     if status != 200 or not isinstance(payload, dict):
         logging.warning("[DESKTOP] Falha ao importar '%s' via Zotero Desktop: %s", file_path, payload)
         return None
