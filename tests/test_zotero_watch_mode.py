@@ -29,7 +29,7 @@ class ZoteroWatchModeTests(unittest.TestCase):
         with patch.object(
             zsync,
             "is_zotero_running",
-            side_effect=[True, False],
+            side_effect=[True, True, True, False],
         ) as mock_is_running:
             with patch.object(zsync, "run_sync_mode") as mock_run_sync_mode:
                 with patch("time.sleep") as mock_sleep:
@@ -54,7 +54,7 @@ class ZoteroWatchModeTests(unittest.TestCase):
             ]
         )
         self.assertEqual(mock_run_sync_mode.call_count, 2)
-        self.assertEqual(mock_is_running.call_count, 2)
+        self.assertEqual(mock_is_running.call_count, 4)
         mock_sleep.assert_called_once_with(11)
 
     def test_run_zotero_open_watch_waits_for_open_then_starts_sync_loop_with_configured_interval(self):

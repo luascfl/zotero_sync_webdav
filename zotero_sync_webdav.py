@@ -6382,9 +6382,8 @@ def is_zotero_running() -> bool:
         return False
     return False
 
-def run_adaptive_sync() -> None:
-    """Roda sync enquanto Zotero estiver aberto, notificando só no primeiro ciclo."""
-    interval = get_env_int("ZOTERO_SYNC_INTERVAL_SECONDS", 300)
+def run_open_zotero_sync_loop(interval_seconds: int) -> None:
+    """Sincroniza repetidamente enquanto o Zotero Desktop permanece aberto."""
     first = True
     while is_zotero_running():
         run_sync_mode(
@@ -6395,8 +6394,16 @@ def run_adaptive_sync() -> None:
             }
         )
         first = False
-        # Sleep between iterations, not just after the first
-        time.sleep(interval)
+        if not is_zotero_running():
+            return
+        time.sleep(interval_seconds)
+
+
+def run_adaptive_sync() -> None:
+    """Compatibilidade para o loop adaptativo configurado por ambiente."""
+    run_open_zotero_sync_loop(
+        get_env_int("ZOTERO_SYNC_INTERVAL_SECONDS", 300)
+    )
 
 
 
@@ -6445,27 +6452,23 @@ def main(argv: List[str] | None = None) -> int:
 
 def run_zotero_open_watch() -> None:
     """Serviço residente que dispara o sync assim que o Zotero é aberto."""
-    import subprocess
     logging.info("[WATCHER] Watcher de abertura do Zotero iniciado.")
-    was_running = is_zotero_running()
+    poll_seconds = get_env_int("ZOTERO_OPEN_WATCH_POLL_SECONDS", 5)
+    was_running = False
     
     while True:
         is_running = is_zotero_running()
         
         if is_running and not was_running:
-            logging.info("[WATCHER] Zotero aberto detectado. Disparando sync imediata.")
+            logging.info("[WATCHER] Zotero aberto detectado. Iniciando loop de sync.")
             try:
-                subprocess.Popen(
-                    ["python3", str(Path(__file__).resolve()), "sync"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
+                run_open_zotero_sync_loop(
+                    get_env_int("ZOTERO_SYNC_INTERVAL_SECONDS", 300)
                 )
-            except OSError as exc:
-                logging.error("[WATCHER] Falha ao disparar sync: %s", exc)
-                
+            except Exception as exc:
+                logging.error("[WATCHER] Falha no loop de sync: %s", exc, exc_info=True)
         was_running = is_running
-        time.sleep(5)
+        time.sleep(poll_seconds)
 
 
     parser.error(f'Comando não suportado: {args.command}')
