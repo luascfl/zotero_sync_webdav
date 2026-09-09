@@ -730,26 +730,42 @@ class BibliographicMatchingTests(unittest.TestCase):
         self.assertIn("discardStandaloneAttachment", bootstrap)
 
 
-    def test_sync_item_collections_to_drive_collection_replaces_managed_subset(self):
+    def test_sync_item_collections_to_drive_collection_uses_latest_item_version(self):
         class FakeZotero:
             def __init__(self):
                 self.updated = []
+                self.item_calls = []
+
+            def item(self, key):
+                self.item_calls.append(key)
+                return {
+                    "data": {
+                        "key": key,
+                        "version": 42,
+                        "collections": ["OLDCOL", "FREEFORM"],
+                    }
+                }
 
             def update_item(self, item):
                 self.updated.append(item)
 
         zot = FakeZotero()
-        item = {"data": {"collections": ["OLDCOL", "FREEFORM"]}}
+        stale_item = {"data": {"key": "ITEM1", "version": 41, "collections": ["OLDCOL", "FREEFORM"]}}
         changed = zsync.sync_item_collections_to_drive_collection(
             zot,
             "ITEM1",
             "NEWCOL",
             {"OLDCOL": {}, "NEWCOL": {}},
-            item=item,
+            item=stale_item,
         )
         self.assertTrue(changed)
-        self.assertEqual(item["data"]["collections"], ["FREEFORM", "NEWCOL"])
-        self.assertEqual(zot.updated[0]["collections"], ["FREEFORM", "NEWCOL"])
+        self.assertEqual(zot.item_calls, ["ITEM1"])
+        self.assertEqual(stale_item["data"]["collections"], ["FREEFORM", "NEWCOL"])
+        self.assertEqual(zot.updated, [{
+            "key": "ITEM1",
+            "version": 42,
+            "collections": ["FREEFORM", "NEWCOL"],
+        }])
 
     def test_remove_empty_directories_preserves_obsidian(self):
         with tempfile.TemporaryDirectory() as temp_dir:

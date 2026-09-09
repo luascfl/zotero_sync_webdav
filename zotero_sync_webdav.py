@@ -4456,7 +4456,9 @@ def sync_item_collections_to_drive_collection(
     if not item_key or not drive_collection_key or drive_collection_key not in collection_by_key:
         return False
     try:
-        current_item = item if item and item.get("data") else zot.item(item_key)
+        # A lista de anexos pertence ao início do ciclo e pode ficar defasada
+        # enquanto o Zotero Desktop sincroniza. O PATCH precisa da versão atual.
+        current_item = zot.item(item_key)
         item_data = dict(current_item.get("data") or current_item)
         current_collections = list(item_data.get("collections") or [])
         unmanaged = [key for key in current_collections if key not in collection_by_key]
@@ -4467,9 +4469,9 @@ def sync_item_collections_to_drive_collection(
         if new_collections == current_collections:
             return False
         item_data["collections"] = new_collections
-        zot.update_item(item_data)
+        zot.update_item(sanitize_zotero_update_payload(item_data))
         if item is not None:
-            item.setdefault("data", {})["collections"] = new_collections
+            item["data"] = item_data
         logging.info(
             "[COLLECTION] Item %s agora segue a coleção do drive %s (antes=%s, depois=%s).",
             item_key,
