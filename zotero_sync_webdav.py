@@ -6369,16 +6369,31 @@ def run_sync_mode(notification_policy: dict | None = None):
         sys.exit(1)
 
 
+def is_zotero_desktop_process(cmdline: str) -> bool:
+    """Retorna se a linha de comando pertence ao processo principal da janela Zotero."""
+    normalized = cmdline.casefold()
+    if "zotero" not in normalized or "zotero_sync" in normalized:
+        return False
+    if any(marker in normalized for marker in (
+        "--headless",
+        "-headless",
+        "-contentproc",
+        "-gpu-process",
+        "-utility",
+    )):
+        return False
+    return "zotero-bin" in normalized
+
+
 def is_zotero_running() -> bool:
-    """Detecta processo Zotero em execução (ignora headless e o próprio script)."""
+    """Detecta a janela principal do Zotero, ignorando serviços headless e filhos."""
     try:
         for pid in filter(str.isdigit, os.listdir("/proc")):
             try:
                 cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "ignore")
             except OSError:
                 continue
-            # Must contain zotero-bin or be the main zotero app, but not our script and not headless
-            if "zotero" in cmdline.lower() and "zotero_sync" not in cmdline.lower() and "--headless" not in cmdline.lower():
+            if is_zotero_desktop_process(cmdline):
                 return True
     except OSError:
         return False

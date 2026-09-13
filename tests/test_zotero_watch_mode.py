@@ -25,6 +25,20 @@ class ZoteroWatchModeTests(unittest.TestCase):
             icon="zotero",
         )
 
+    def test_zotero_process_detection_ignores_headless_and_child_processes(self):
+        self.assertFalse(zsync.is_zotero_desktop_process(
+            "/home/lucas/Apps/zotero-beta/zotero-bin -app app.ini --headless"
+        ))
+        self.assertFalse(zsync.is_zotero_desktop_process(
+            "/home/lucas/Apps/zotero-beta/zotero-bin -contentproc -parentPid 9930"
+        ))
+        self.assertFalse(zsync.is_zotero_desktop_process(
+            "python3 zotero_sync_webdav.py watch-zotero"
+        ))
+        self.assertTrue(zsync.is_zotero_desktop_process(
+            "/home/lucas/Apps/zotero-beta/zotero-bin -app app.ini"
+        ))
+
     def test_run_open_zotero_sync_loop_only_notifies_on_first_iteration_and_stops_when_zotero_closes(self):
         with patch.object(
             zsync,
