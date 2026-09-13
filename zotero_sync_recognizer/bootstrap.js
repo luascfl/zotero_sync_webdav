@@ -387,7 +387,7 @@ function buildStatusWindow(statusState) {
 	statusState.progress.style.width = "100%";
 	statusState.progressLabel = appendStatusElement(doc, main, "p");
 	statusState.counts = appendStatusElement(doc, main, "p");
-	statusState.counts.style.cssText = "border-top: 1px solid #c8c8c8; margin: 0; padding-top: 12px;";
+	statusState.counts.style.cssText = "margin: 0;";
 	statusState.details = appendStatusElement(doc, main, "p");
 	statusState.details.style.overflowWrap = "anywhere";
 	statusState.updated = appendStatusElement(doc, main, "p");
