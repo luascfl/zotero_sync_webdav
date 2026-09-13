@@ -35,7 +35,7 @@ Dependencies:
 - Milestone 2 complete.
 
 ## Milestone 4: Zotero sync status panel
-Status: in progress.
+Status: complete. Completed on 2026-09-13.
 
 Goal:
 Extend the existing `zotero-sync-recognizer` extension with a local read-only panel that exposes the active sync progress, last completion, errors, and duplicate-review counts without changing its recognition, import, fallback, or HTTP endpoint roles.

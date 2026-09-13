@@ -201,7 +201,7 @@
     {
       "id": "US-008",
       "title": "Present sync status in the existing Zotero extension",
-      "status": "in_progress",
+      "status": "done",
       "dependsOn": [
         "US-001",
         "US-004"
