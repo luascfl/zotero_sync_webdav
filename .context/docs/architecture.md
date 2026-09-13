@@ -21,7 +21,7 @@ The primary topology is a local automation script that reads configuration from 
 - Hash/cache layer: SHA-256 hashes stored under `~/.cache/zotero_sync_webdav/hash_cache.json`.
 - Reporting layer: console output, logging, daily log file, optional desktop notification.
 - Unified operations layer: the main script now exposes sync, diagnostics, duplicate cleanup, and autostart setup from one CLI.
-- Local status panel: the synchronizer atomically publishes a compact JSON snapshot at `~/.cache/zotero_sync_webdav/sync_status.json`; the existing `zotero-sync-recognizer` extension reads it only while its Tools-menu panel is visible. The panel has no control path to start, stop, or modify a synchronization.
+- Local status panel: the synchronizer atomically publishes a compact JSON snapshot at `~/.cache/zotero_sync_webdav/sync_status.json`; the existing `zotero-sync-recognizer` extension opens one reusable native Zotero status window from Tools and reads that snapshot only while the window is visible. The window has no control path to start, stop, or modify a synchronization.
 - Support utilities: unified collection routing, removing the need for a separate physical Obsidian mirror since `zoterodb` serves as the primary vault.
 
 ## Core Architecture Paradigm: Unified Vault
@@ -41,7 +41,7 @@ The Google Drive directory (`zoterodb`) serves concurrently as the Zotero physic
 
 ## Entry points
 - `zotero_sync_webdav.py`: primary unified automation path with subcommands for sync, diagnostics, duplicate cleanup, autostart setup, and Obsidian workflows.
-- `zotero_sync_recognizer/`: the installed Zotero extension. It retains the local recognition/import/fallback endpoints and adds the read-only status-panel menu action.
+- `zotero_sync_recognizer/`: the installed Zotero extension. It retains the local recognition/import/fallback endpoints and adds the read-only status-window menu action.
 
 ## Public API surface
 Important callable units observed in the unified script include `collect_all_pdfs`, `collect_all_attachments`, `compute_sha256`, `rename_webdav_file`, `rename_local_attachment`, `copy_to_local_storage`, `build_duplicate_groups`, `find_missing_drive_pdfs_in_zotero`, `run_diagnostic_mode`, and `run_duplicate_cleanup_mode`.

@@ -1,3 +1,6 @@
+import io
+import zipfile
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -76,6 +79,16 @@ class DesktopRecognizerAssetsTests(unittest.TestCase):
             self.assertEqual(staged.name, source.name)
             self.assertEqual(staged.read_bytes(), b"pdf-content")
 
+
+    def test_packages_status_window_resources(self):
+        payload = zsync.build_desktop_recognizer_xpi()
+
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            entries = set(archive.namelist())
+
+        self.assertTrue(
+            {"content/status.xhtml", "content/status.js"}.issubset(entries)
+        )
 
 if __name__ == "__main__":
     unittest.main()
