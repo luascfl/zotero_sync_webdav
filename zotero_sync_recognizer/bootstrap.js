@@ -2,7 +2,7 @@ var ENDPOINTS = [];
 var STATUS_MENU_ID = "zotero-sync-recognizer-status-menuitem";
 var STATUS_WINDOWS = new Map();
 var STATUS_WINDOW_NAME = "zotero-sync-recognizer-status";
-var chromeHandle = null;
+var extensionRootURI = null;
 
 function log(msg) {
 	Zotero.debug("Zotero Sync Recognizer: " + msg);
@@ -269,7 +269,7 @@ function openStatusWindow(win) {
 	}
 	try {
 		let statusWindow = win.openDialog(
-			"chrome://zotero-sync-recognizer/content/status.xhtml",
+			extensionRootURI + "content/status.xhtml",
 			STATUS_WINDOW_NAME,
 			"chrome,dialog=no,resizable,centerscreen,width=500,height=380"
 		);
@@ -424,16 +424,11 @@ function removeEndpoints() {
 	ENDPOINTS = [];
 }
 
-function registerStatusWindowChrome(rootURI) {
-	chromeHandle = aomStartup.registerChrome(rootURI, [
-		["content", "zotero-sync-recognizer", "content/"],
-	]);
-}
 
 function install() {}
 
 function startup({ rootURI }) {
-	registerStatusWindowChrome(rootURI);
+	extensionRootURI = rootURI.spec || String(rootURI);
 	installEndpoints();
 	for (let win of Zotero.getMainWindows()) {
 		installStatusMenu(win);
@@ -454,10 +449,7 @@ function shutdown() {
 		removeStatusUI(win);
 	}
 	removeEndpoints();
-	if (chromeHandle) {
-		chromeHandle.destruct();
-		chromeHandle = null;
-	}
+	extensionRootURI = null;
 	log("stopped");
 }
 
