@@ -131,18 +131,19 @@ class DesktopNotificationTests(unittest.TestCase):
 
         with patch.object(zsync, "update_pending_import_queue_files") as mock_update_queue:
             with patch.object(zsync, "send_completion_notification") as mock_completion:
-                with patch.object(zsync, "LOG_FILE_PATH", "/tmp/zotero-sync.log"):
-                    with patch("builtins.open", mocked_open) as mock_file:
-                        with patch.object(zsync, "datetime") as mock_datetime:
-                            mock_datetime.now.return_value.isoformat.return_value = (
-                                "2026-07-09T14:30:00"
-                            )
+                with patch.object(zsync, "publish_sync_status"):
+                    with patch.object(zsync, "LOG_FILE_PATH", "/tmp/zotero-sync.log"):
+                        with patch("builtins.open", mocked_open) as mock_file:
+                            with patch.object(zsync, "datetime") as mock_datetime:
+                                mock_datetime.now.return_value.isoformat.return_value = (
+                                    "2026-07-09T14:30:00"
+                                )
 
-                            zsync.finalize_execution(
-                                stats,
-                                "Resumo da sync",
-                                notify_completion=False,
-                            )
+                                zsync.finalize_execution(
+                                    stats,
+                                    "Resumo da sync",
+                                    notify_completion=False,
+                                )
 
         mock_update_queue.assert_called_once_with(["alpha.pdf"])
         mock_file.assert_called_once_with(

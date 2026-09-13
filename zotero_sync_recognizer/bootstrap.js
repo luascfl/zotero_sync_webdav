@@ -1,4 +1,8 @@
 var ENDPOINTS = [];
+var STATUS_MENU_ID = "zotero-sync-recognizer-status-menuitem";
+var STATUS_PANEL_ID = "zotero-sync-recognizer-status-panel";
+var STATUS_PANELS = new Map();
+var STATUS_POLL_INTERVAL_MS = 2000;
 
 function log(msg) {
 	Zotero.debug("Zotero Sync Recognizer: " + msg);
@@ -253,6 +257,222 @@ async function discardStandaloneAttachment(payload) {
 	return { discarded: item.key };
 }
 
+function createXULElement(doc, name) {
+	return doc.createXULElement ? doc.createXULElement(name) : doc.createElement(name);
+}
+
+function getStatusSnapshotPath() {
+	let home = Services.dirsvc.get("Home", Ci.nsIFile).path;
+	return home + "/.cache/zotero_sync_webdav/sync_status.json";
+}
+
+async function readSyncStatusSnapshot() {
+	try {
+		let raw = await Zotero.File.getContentsAsync(getStatusSnapshotPath());
+		let snapshot = JSON.parse(raw);
+		if (!snapshot || typeof snapshot != "object") {
+			throw new Error("O arquivo de status não contém um objeto JSON.");
+		}
+		return snapshot;
+	}
+	catch (e) {
+		return {
+			state: "unavailable",
+			message: e && e.message ? e.message : String(e),
+		};
+	}
+}
+
+function statusTitle(state) {
+	switch (state) {
+		case "running":
+			return "Sincronização em andamento";
+		case "completed":
+			return "Última sincronização concluída";
+		case "failed":
+			return "Sincronização interrompida";
+		default:
+			return "Status indisponível";
+	}
+}
+
+function formatTimestamp(value) {
+	if (!value) {
+		return "Sem execução concluída registrada.";
+	}
+	let timestamp = new Date(value);
+	return isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString();
+}
+
+function renderStatusPanel(panelState, snapshot) {
+	let unavailable = snapshot.state == "unavailable";
+	let progress = snapshot.progress || {};
+	let counts = snapshot.counts || {};
+	let processed = Number(progress.processed || 0);
+	let total = Number(progress.total || 0);
+	let percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+
+	panelState.title.value = statusTitle(snapshot.state);
+	panelState.stage.value = unavailable
+		? "O sincronizador ainda não publicou um status local."
+		: (snapshot.stage || "Aguardando próxima atualização.");
+	panelState.progress.hidden = unavailable;
+	panelState.progress.value = percent;
+	panelState.progressLabel.value = unavailable
+		? "Abra o log se o sincronizador não estiver em execução."
+		: (total > 0 ? "PDFs processados: " + processed + " de " + total + " (" + percent + "%)" : "Nenhum PDF em processamento.");
+	panelState.counts.value = unavailable
+		? "Motivo: " + (snapshot.message || "snapshot ausente")
+		: "Erros: " + Number(counts.errors || 0)
+			+ "  |  Bloqueios de duplicata: " + Number(counts.duplicateBlocks || 0)
+			+ "  |  Revisões: " + Number(counts.duplicateReview || 0);
+	panelState.details.value = unavailable
+		? "O painel é somente leitura e nunca inicia uma sync."
+		: (snapshot.lastError
+			? "Último erro: " + snapshot.lastError
+			: "Adicionados: " + Number(counts.added || 0)
+				+ "  |  Existentes: " + Number(counts.existing || 0)
+				+ "  |  Grupos duplicados: " + Number(counts.duplicateGroups || 0));
+	panelState.updated.value = "Atualizado: " + formatTimestamp(snapshot.updatedAt || snapshot.completedAt);
+}
+
+async function refreshStatusPanel(panelState) {
+	if (panelState.refreshing) {
+		return;
+	}
+	panelState.refreshing = true;
+	try {
+		renderStatusPanel(panelState, await readSyncStatusSnapshot());
+	}
+	finally {
+		panelState.refreshing = false;
+	}
+}
+
+function stopStatusPolling(panelState) {
+	if (panelState.timer) {
+		panelState.window.clearInterval(panelState.timer);
+		panelState.timer = null;
+	}
+}
+
+function startStatusPolling(panelState) {
+	stopStatusPolling(panelState);
+	refreshStatusPanel(panelState);
+	panelState.timer = panelState.window.setInterval(
+		() => refreshStatusPanel(panelState),
+		STATUS_POLL_INTERVAL_MS
+	);
+}
+
+function createStatusPanel(win, anchor) {
+	let doc = win.document;
+	let panel = createXULElement(doc, "panel");
+	panel.id = STATUS_PANEL_ID;
+	panel.setAttribute("type", "arrow");
+	panel.setAttribute("noautohide", "true");
+
+	let box = createXULElement(doc, "vbox");
+	box.style.padding = "14px";
+	box.style.width = "390px";
+	box.style.gap = "8px";
+	panel.appendChild(box);
+
+	let title = createXULElement(doc, "label");
+	title.style.fontWeight = "600";
+	title.style.fontSize = "1.1em";
+	box.appendChild(title);
+
+	let stage = createXULElement(doc, "label");
+	stage.setAttribute("crop", "end");
+	box.appendChild(stage);
+
+	let progress = createXULElement(doc, "progressmeter");
+	progress.setAttribute("mode", "determined");
+	box.appendChild(progress);
+
+	let progressLabel = createXULElement(doc, "label");
+	box.appendChild(progressLabel);
+
+	let separator = createXULElement(doc, "separator");
+	separator.setAttribute("class", "thin");
+	box.appendChild(separator);
+
+	let counts = createXULElement(doc, "label");
+	counts.setAttribute("crop", "end");
+	box.appendChild(counts);
+
+	let details = createXULElement(doc, "label");
+	details.setAttribute("crop", "end");
+	details.setAttribute("multiline", "true");
+	box.appendChild(details);
+
+	let updated = createXULElement(doc, "label");
+	updated.style.opacity = "0.72";
+	box.appendChild(updated);
+
+	let closeButton = createXULElement(doc, "button");
+	closeButton.setAttribute("label", "Fechar");
+	box.appendChild(closeButton);
+
+	let panelState = {
+		window: win,
+		panel,
+		anchor,
+		title,
+		stage,
+		progress,
+		progressLabel,
+		counts,
+		details,
+		updated,
+		timer: null,
+		refreshing: false,
+	};
+	closeButton.addEventListener("command", () => panel.hidePopup());
+	panel.addEventListener("popupshown", () => startStatusPolling(panelState));
+	panel.addEventListener("popuphidden", () => stopStatusPolling(panelState));
+	doc.documentElement.appendChild(panel);
+	STATUS_PANELS.set(win, panelState);
+	return panelState;
+}
+
+function openStatusPanel(win, anchor) {
+	let panelState = STATUS_PANELS.get(win) || createStatusPanel(win, anchor);
+	panelState.anchor = anchor;
+	panelState.panel.openPopup(anchor, "after_end", 0, 0, false, false);
+}
+
+function installStatusMenu(win) {
+	let doc = win.document;
+	if (doc.getElementById(STATUS_MENU_ID)) {
+		return;
+	}
+	let toolsPopup = doc.getElementById("menu_ToolsPopup");
+	if (!toolsPopup) {
+		log("menu Ferramentas não encontrado; painel de status não instalado.");
+		return;
+	}
+	let item = createXULElement(doc, "menuitem");
+	item.id = STATUS_MENU_ID;
+	item.setAttribute("label", "Status da sincronização Zotero");
+	item.addEventListener("command", () => openStatusPanel(win, item));
+	toolsPopup.appendChild(item);
+}
+
+function removeStatusUI(win) {
+	let panelState = STATUS_PANELS.get(win);
+	if (panelState) {
+		stopStatusPolling(panelState);
+		panelState.panel.remove();
+		STATUS_PANELS.delete(win);
+	}
+	let menuItem = win.document.getElementById(STATUS_MENU_ID);
+	if (menuItem) {
+		menuItem.remove();
+	}
+}
+
 function installEndpoints() {
 	var pingPath = "/zoteroSyncRecognize/ping";
 	var recognizePath = "/zoteroSyncRecognize/recognize";
@@ -370,10 +590,24 @@ function install() {}
 
 function startup() {
 	installEndpoints();
+	for (let win of Zotero.getMainWindows()) {
+		installStatusMenu(win);
+	}
 	log("started");
 }
 
+function onMainWindowLoad({ window }) {
+	installStatusMenu(window);
+}
+
+function onMainWindowUnload({ window }) {
+	removeStatusUI(window);
+}
+
 function shutdown() {
+	for (let win of Zotero.getMainWindows()) {
+		removeStatusUI(win);
+	}
 	removeEndpoints();
 	log("stopped");
 }

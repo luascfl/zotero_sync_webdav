@@ -197,6 +197,24 @@
         "Add unit tests for ensure_single_instance covering successful lock acquisition and lock collision.",
         "The quality gates pass."
       ]
+    },
+    {
+      "id": "US-008",
+      "title": "Present sync status in the existing Zotero extension",
+      "status": "in_progress",
+      "dependsOn": [
+        "US-001",
+        "US-004"
+      ],
+      "description": "As an operator, I want the existing Zotero Sync Recognizer extension to open a local read-only status panel from the Zotero menu so I can see current progress, the latest outcome, errors, and duplicate-review work without opening logs or changing the automated sync.",
+      "acceptanceCriteria": [
+        "Keep zotero_sync_recognizer as the only extension and preserve its ping, recognize, import, discard, and fallback behaviors.",
+        "The synchronizer atomically writes a local JSON status snapshot at startup, during PDF processing, on successful completion, and on terminal errors without contacting a new service.",
+        "The extension adds a Zotero menu action that opens one reusable status panel and polls only that local snapshot while visible.",
+        "The panel shows idle/running/failed/completed state, processed versus total PDFs, errors, duplicate blocks/review work, and the latest completion time.",
+        "A missing or malformed snapshot is shown as an explicit unavailable state; opening the panel never starts, stops, or modifies a sync.",
+        "Unit tests cover snapshot contents and failure states without a live Zotero API call; JavaScript syntax validation covers the extension source."
+      ]
     }
   ]
 }

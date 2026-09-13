@@ -206,6 +206,10 @@ LOG_DESKTOP_FILE = os.path.join(
     f"{LOG_DESKTOP_ID}.desktop",
 )
 
+SYNC_STATUS_FILE = os.path.join(CACHE_DIR, "sync_status.json")
+SYNC_STATUS_SCHEMA_VERSION = 1
+SYNC_STATUS_PROGRESS_INTERVAL = 5
+
 HASH_CACHE: Dict[str, dict] = {}
 
 # FIX: Limites aumentados para cobrir bibliotecas grandes.
@@ -664,6 +668,74 @@ def update_pending_import_queue_files(pending: list[str]) -> None:
         logging.warning("[FILA] Erro ao atualizar lista de pendentes: %s", exc)
 
 
+def build_sync_status_snapshot(
+    stats: dict,
+    state: str,
+    stage: str,
+    completed_at: str | None = None,
+) -> dict:
+    """Constrói o contrato local consumido pelo painel da extensão Zotero."""
+    total = int(stats.get("folder_total_pdfs", 0) or 0)
+    processed = int(stats.get("processed", 0) or 0)
+    review_count = max(
+        int(stats.get("review_tags_applied", 0) or 0),
+        int(stats.get("blocked_duplicate_risk", 0) or 0),
+        int(stats.get("auto_duplicate_cleanup_skipped", 0) or 0),
+    )
+    snapshot = {
+        "schemaVersion": SYNC_STATUS_SCHEMA_VERSION,
+        "state": state,
+        "stage": stage,
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+        "startedAt": stats.get("sync_started_at"),
+        "progress": {
+            "processed": processed,
+            "total": total,
+        },
+        "counts": {
+            "added": int(stats.get("added", 0) or 0),
+            "existing": int(stats.get("skipped", 0) or 0),
+            "errors": int(stats.get("errors", 0) or 0),
+            "duplicateBlocks": int(stats.get("blocked_duplicate_risk", 0) or 0),
+            "duplicateGroups": int(stats.get("bibliographic_duplicate_groups", 0) or 0),
+            "duplicateReview": review_count,
+            "pendingImports": len(stats.get("pending_desktop_imports", [])),
+        },
+    }
+    if stats.get("last_error"):
+        snapshot["lastError"] = str(stats["last_error"])
+    if completed_at:
+        snapshot["completedAt"] = completed_at
+    return snapshot
+
+
+def publish_sync_status(
+    stats: dict,
+    state: str,
+    stage: str,
+    completed_at: str | None = None,
+) -> None:
+    """Publica status local por troca atômica, sem afetar o fluxo da sync."""
+    snapshot = build_sync_status_snapshot(stats, state, stage, completed_at)
+    target = Path(SYNC_STATUS_FILE)
+    temporary = target.with_name(f".{target.name}.tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(temporary, target)
+    except OSError as exc:
+        logging.warning("[STATUS] Não foi possível publicar o status da sync: %s", exc)
+
+
+def record_sync_error(stats: dict, message: str) -> None:
+    """Registra a última falha relevante exibida pelo painel sem esconder o log."""
+    stats["errors"] = int(stats.get("errors", 0) or 0) + 1
+    stats["last_error"] = message
+
+
 def build_completion_notification_body(stats: dict, log_path: str | None) -> str:
     """Monta o corpo da notificação de conclusão."""
     body_parts = [
@@ -706,6 +778,7 @@ def finalize_execution(
     stats: dict,
     summary_text: str | None = None,
     notify_completion: bool = True,
+    terminal_state: str | None = None,
 ) -> None:
     """Atualiza o log diário e dispara a notificação."""
     global _HEADLESS_ZOTERO_PROC
@@ -719,6 +792,14 @@ def finalize_execution(
         _HEADLESS_ZOTERO_PROC = None
 
     update_pending_import_queue_files(stats.get('pending_desktop_imports', []))
+
+    completed_at = datetime.now(timezone.utc).isoformat()
+    publish_sync_status(
+        stats,
+        terminal_state or ("failed" if stats.get("errors", 0) else "completed"),
+        "Sincronização finalizada",
+        completed_at,
+    )
 
     if LOG_FILE_PATH:
         try:
@@ -5511,6 +5592,15 @@ def run_sync_mode(notification_policy: dict | None = None):
     # 0. Preflight
     pf_errors = preflight_checks()
     if pf_errors:
+        publish_sync_status(
+            {
+                "errors": len(pf_errors),
+                "last_error": pf_errors[0],
+            },
+            "failed",
+            "Pré-requisitos indisponíveis",
+            datetime.now(timezone.utc).isoformat(),
+        )
         for e in pf_errors:
             logging.error("[PREFLIGHT] %s", e)
         print("❌ Preflight falhou:")
@@ -5570,6 +5660,8 @@ def run_sync_mode(notification_policy: dict | None = None):
         'review_tags_removed': 0,
         'current_review_duplicate_keys': set(),
     }
+    stats["sync_started_at"] = datetime.now(timezone.utc).isoformat()
+    publish_sync_status(stats, "running", "Preparando sincronização")
     tie_conflicts: list[dict[str, str]] = []
 
 
@@ -5588,7 +5680,7 @@ def run_sync_mode(notification_policy: dict | None = None):
         print("✓ Conexão com a Zotero API bem-sucedida.")
     except Exception as e:
         logging.error(f"Falha ao conectar à Zotero API. Verifique suas credenciais. Erro: {e}")
-        finalize_execution(stats)
+        finalize_execution(stats, terminal_state="failed")
         sys.exit(1)
 
     # 2. Coletar TODOS os anexos existentes no Zotero
@@ -5610,7 +5702,7 @@ def run_sync_mode(notification_policy: dict | None = None):
 
     except Exception as e:
         logging.error(f"Erro ao coletar anexos do Zotero: {e}")
-        finalize_execution(stats)
+        finalize_execution(stats, terminal_state="failed")
         return
 
     standalone_names_changed = normalize_standalone_attachment_names(
@@ -5651,7 +5743,7 @@ def run_sync_mode(notification_policy: dict | None = None):
             f"{stats['zotero_bibliographic_indexed']} títulos candidatos indexados."
         )
     except Exception as e:
-        stats['errors'] += 1
+        record_sync_error(stats, "Não foi possível coletar os itens bibliográficos.")
         logging.error(
             "[BIB] Erro ao coletar itens bibliográficos: %s. "
             "Sincronização abortada para evitar criação de anexos soltos que podem virar duplicatas.",
@@ -5729,8 +5821,10 @@ def run_sync_mode(notification_policy: dict | None = None):
     #
     print(f"\nVerificando a pasta: {TARGET_FOLDER}")
     if not os.path.isdir(TARGET_FOLDER):
-        logging.error(f"A pasta alvo não foi encontrada ou não é um diretório: {TARGET_FOLDER}")
-        finalize_execution(stats)
+        message = "A pasta alvo não foi encontrada ou não é um diretório."
+        logging.error(message)
+        record_sync_error(stats, message)
+        finalize_execution(stats, terminal_state="failed")
         return
 
     try:
@@ -5743,9 +5837,13 @@ def run_sync_mode(notification_policy: dict | None = None):
 
 
         print(f"Encontrados {stats['folder_total_pdfs']} PDFs. Processando todos.")
+        publish_sync_status(stats, "running", "Processando PDFs")
 
         if not probe_pdf_content_read(files_to_process[0]):
-            stats['errors'] += 1
+            record_sync_error(
+                stats,
+                "O mount não conseguiu ler o conteúdo do primeiro PDF.",
+            )
             logging.error(
                 "[PROBE] Sincronização abortada: o mount não conseguiu ler conteúdo do primeiro PDF. "
                 "Verifique o rclone/Koofr antes de tentar adicionar ou comparar anexos.",
@@ -5787,6 +5885,16 @@ def run_sync_mode(notification_policy: dict | None = None):
                 collection_path_to_key,
             )
             logging.info("[LOOP] Processando %d/%d: '%s'.", index, total_files_to_process, relative_drive_path)
+            if (
+                index == 1
+                or index == total_files_to_process
+                or index % SYNC_STATUS_PROGRESS_INTERVAL == 0
+            ):
+                publish_sync_status(
+                    stats,
+                    "running",
+                    f"Processando PDF {index} de {total_files_to_process}",
+                )
             norm_local = normalize_filename(file_name)
             norm_local_aggressive = normalize_aggressive(file_name)
             norm_rel = normalize_relative_path_key(relative_drive_path)
@@ -6156,7 +6264,10 @@ def run_sync_mode(notification_policy: dict | None = None):
                 if not desktop_result:
                     existing_filenames.pop(norm_local, None)
                     existing_filenames_aggressive.pop(norm_local_aggressive, None)
-                    stats['errors'] += 1
+                    record_sync_error(
+                        stats,
+                        f"Falha ao importar '{file_name}' via Zotero Desktop/WebDAV.",
+                    )
                     logging.error("[ERRO] Falha ao importar '%s' via Zotero Desktop/WebDAV.", file_name)
                     continue
 
@@ -6164,7 +6275,10 @@ def run_sync_mode(notification_policy: dict | None = None):
                 if not new_key:
                     existing_filenames.pop(norm_local, None)
                     existing_filenames_aggressive.pop(norm_local_aggressive, None)
-                    stats['errors'] += 1
+                    record_sync_error(
+                        stats,
+                        f"A importação de '{file_name}' não retornou uma chave Zotero.",
+                    )
                     logging.error("[ERRO] Chave não retornada pela importação desktop para '%s'. Resposta: %s", file_name, desktop_result)
                     continue
 
@@ -6227,7 +6341,10 @@ def run_sync_mode(notification_policy: dict | None = None):
             except Exception as e:
                 existing_filenames.pop(norm_local, None)
                 existing_filenames_aggressive.pop(norm_local_aggressive, None)
-                stats['errors'] += 1
+                record_sync_error(
+                    stats,
+                    f"Exceção ao importar '{file_name}' via Zotero Desktop.",
+                )
                 logging.error("[ERRO] Exceção ao importar '%s' via Zotero Desktop: %s", file_name, e)
 
 

@@ -33,3 +33,16 @@ Story order:
 
 Dependencies:
 - Milestone 2 complete.
+
+## Milestone 4: Zotero sync status panel
+Status: in progress.
+
+Goal:
+Extend the existing `zotero-sync-recognizer` extension with a local read-only panel that exposes the active sync progress, last completion, errors, and duplicate-review counts without changing its recognition, import, fallback, or HTTP endpoint roles.
+
+Story order:
+1. US-008: Publish and present local sync status.
+
+Dependencies:
+- Milestones 1–3 complete.
+- The existing extension and desktop connector remain the integration boundary.
