@@ -2,7 +2,7 @@ var ENDPOINTS = [];
 var STATUS_MENU_ID = "zotero-sync-recognizer-status-menuitem";
 var STATUS_WINDOWS = new Map();
 var STATUS_WINDOW_NAME = "zotero-sync-recognizer-status";
-var extensionRootURI = null;
+var STATUS_POLL_INTERVAL_MS = 2000;
 
 function log(msg) {
 	Zotero.debug("Zotero Sync Recognizer: " + msg);
@@ -261,24 +261,188 @@ function createXULElement(doc, name) {
 	return doc.createXULElement ? doc.createXULElement(name) : doc.createElement(name);
 }
 
+function getStatusSnapshotPath() {
+	let home = Services.dirsvc.get("Home", Ci.nsIFile).path;
+	return home + "/.cache/zotero_sync_webdav/sync_status.json";
+}
+
+async function readSyncStatusSnapshot() {
+	try {
+		let raw = await Zotero.File.getContentsAsync(getStatusSnapshotPath());
+		let snapshot = JSON.parse(raw);
+		if (!snapshot || typeof snapshot != "object") {
+			throw new Error("O arquivo de status não contém um objeto JSON.");
+		}
+		return snapshot;
+	}
+	catch (error) {
+		return {
+			state: "unavailable",
+			message: error && error.message ? error.message : String(error),
+		};
+	}
+}
+
+function statusTitle(state) {
+	switch (state) {
+		case "running":
+			return "Sincronização em andamento";
+		case "completed":
+			return "Última sincronização concluída";
+		case "failed":
+			return "Sincronização interrompida";
+		default:
+			return "Status indisponível";
+	}
+}
+
+function formatTimestamp(value) {
+	if (!value) {
+		return "Sem execução concluída registrada.";
+	}
+	let timestamp = new Date(value);
+	return isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString();
+}
+
+function appendStatusElement(doc, parent, name, text) {
+	let element = doc.createElement(name);
+	if (text) {
+		element.textContent = text;
+	}
+	parent.appendChild(element);
+	return element;
+}
+
+function renderStatusWindow(statusState, snapshot) {
+	let unavailable = snapshot.state == "unavailable";
+	let progress = snapshot.progress || {};
+	let counts = snapshot.counts || {};
+	let processed = Number(progress.processed || 0);
+	let total = Number(progress.total || 0);
+	let percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+
+	statusState.title.textContent = statusTitle(snapshot.state);
+	statusState.stage.textContent = unavailable
+		? "O sincronizador ainda não publicou um status local."
+		: (snapshot.stage || "Aguardando próxima atualização.");
+	statusState.progress.hidden = unavailable;
+	statusState.progress.value = percent;
+	statusState.progressLabel.textContent = unavailable
+		? "Abra o log se o sincronizador não estiver em execução."
+		: (total > 0 ? "PDFs processados: " + processed + " de " + total + " (" + percent + "%)" : "Nenhum PDF em processamento.");
+	statusState.counts.textContent = unavailable
+		? "Motivo: " + (snapshot.message || "snapshot ausente")
+		: "Erros: " + Number(counts.errors || 0)
+			+ "  |  Bloqueios de duplicata: " + Number(counts.duplicateBlocks || 0)
+			+ "  |  Revisões: " + Number(counts.duplicateReview || 0);
+	statusState.details.textContent = unavailable
+		? "Esta janela é somente leitura e nunca inicia uma sincronização."
+		: (snapshot.lastError
+			? "Último erro: " + snapshot.lastError
+			: "Adicionados: " + Number(counts.added || 0)
+				+ "  |  Existentes: " + Number(counts.existing || 0)
+				+ "  |  Grupos duplicados: " + Number(counts.duplicateGroups || 0));
+	statusState.updated.textContent = "Atualizado: " + formatTimestamp(snapshot.updatedAt || snapshot.completedAt);
+}
+
+async function refreshStatusWindow(statusState) {
+	if (!statusState.title || statusState.refreshing) {
+		return;
+	}
+	statusState.refreshing = true;
+	try {
+		renderStatusWindow(statusState, await readSyncStatusSnapshot());
+	}
+	finally {
+		statusState.refreshing = false;
+	}
+}
+
+function stopStatusPolling(statusState) {
+	if (statusState.timer) {
+		statusState.window.clearInterval(statusState.timer);
+		statusState.timer = null;
+	}
+}
+
+function buildStatusWindow(statusState) {
+	let doc = statusState.window.document;
+	let body = doc.body;
+	if (!body) {
+		throw new Error("Janela de status sem corpo de documento.");
+	}
+	doc.title = "Status da sincronização Zotero";
+	while (body.firstChild) {
+		body.firstChild.remove();
+	}
+	body.style.cssText = "font: menu; margin: 0; min-width: 430px;";
+	let main = appendStatusElement(doc, body, "main");
+	main.style.cssText = "display: grid; gap: 14px; padding: 20px;";
+	statusState.title = appendStatusElement(doc, main, "h1");
+	statusState.title.style.cssText = "font-size: 1.15rem; margin: 0;";
+	statusState.stage = appendStatusElement(doc, main, "p");
+	statusState.progress = appendStatusElement(doc, main, "progress");
+	statusState.progress.max = 100;
+	statusState.progress.value = 0;
+	statusState.progress.style.width = "100%";
+	statusState.progressLabel = appendStatusElement(doc, main, "p");
+	statusState.counts = appendStatusElement(doc, main, "p");
+	statusState.counts.style.cssText = "border-top: 1px solid #c8c8c8; margin: 0; padding-top: 12px;";
+	statusState.details = appendStatusElement(doc, main, "p");
+	statusState.details.style.overflowWrap = "anywhere";
+	statusState.updated = appendStatusElement(doc, main, "p");
+	statusState.updated.style.cssText = "color: #6a6a6a; font-size: 0.9em; margin: 0;";
+	let footer = appendStatusElement(doc, main, "footer");
+	footer.style.cssText = "display: flex; justify-content: flex-end;";
+	let closeButton = appendStatusElement(doc, footer, "button", "Fechar");
+	closeButton.addEventListener("click", () => statusState.window.close());
+	refreshStatusWindow(statusState);
+	statusState.timer = statusState.window.setInterval(
+		() => refreshStatusWindow(statusState),
+		STATUS_POLL_INTERVAL_MS
+	);
+}
+
 function openStatusWindow(win) {
 	let existing = STATUS_WINDOWS.get(win);
-	if (existing && !existing.closed) {
-		existing.focus();
+	if (existing && !existing.window.closed) {
+		existing.window.focus();
 		return;
 	}
 	try {
-		let statusWindow = win.openDialog(
-			extensionRootURI + "content/status.xhtml",
-			STATUS_WINDOW_NAME,
-			"chrome,dialog=no,resizable,centerscreen,width=500,height=380"
-		);
-		STATUS_WINDOWS.set(win, statusWindow);
-		statusWindow.addEventListener("unload", () => STATUS_WINDOWS.delete(win), { once: true });
+		let statusState = {
+			window: win.openDialog(
+				"about:blank",
+				STATUS_WINDOW_NAME,
+				"chrome,dialog=no,resizable,centerscreen,width=500,height=380"
+			),
+			timer: null,
+			refreshing: false,
+		};
+		STATUS_WINDOWS.set(win, statusState);
+		let setup = () => {
+			try {
+				buildStatusWindow(statusState);
+			}
+			catch (error) {
+				Zotero.logError(error);
+				log("falha ao renderizar janela de status: " + (error && error.message ? error.message : error));
+			}
+		};
+		if (statusState.window.document.readyState == "complete") {
+			setup();
+		}
+		else {
+			statusState.window.addEventListener("load", setup, { once: true });
+		}
+		statusState.window.addEventListener("unload", () => {
+			stopStatusPolling(statusState);
+			STATUS_WINDOWS.delete(win);
+		}, { once: true });
 	}
-	catch (e) {
-		Zotero.logError(e);
-		log("falha ao abrir janela de status: " + (e && e.message ? e.message : e));
+	catch (error) {
+		Zotero.logError(error);
+		log("falha ao abrir janela de status: " + (error && error.message ? error.message : error));
 	}
 }
 
@@ -300,9 +464,9 @@ function installStatusMenu(win) {
 }
 
 function removeStatusUI(win) {
-	let statusWindow = STATUS_WINDOWS.get(win);
-	if (statusWindow && !statusWindow.closed) {
-		statusWindow.close();
+	let statusState = STATUS_WINDOWS.get(win);
+	if (statusState && !statusState.window.closed) {
+		statusState.window.close();
 	}
 	STATUS_WINDOWS.delete(win);
 	let menuItem = win.document.getElementById(STATUS_MENU_ID);
@@ -427,8 +591,7 @@ function removeEndpoints() {
 
 function install() {}
 
-function startup({ rootURI }) {
-	extensionRootURI = rootURI.spec || String(rootURI);
+function startup() {
 	installEndpoints();
 	for (let win of Zotero.getMainWindows()) {
 		installStatusMenu(win);
@@ -449,7 +612,6 @@ function shutdown() {
 		removeStatusUI(win);
 	}
 	removeEndpoints();
-	extensionRootURI = null;
 	log("stopped");
 }
 
