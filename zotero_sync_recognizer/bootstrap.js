@@ -365,7 +365,7 @@ function startStatusPolling(panelState) {
 	);
 }
 
-function createStatusPanel(win, anchor) {
+function createStatusPanel(win) {
 	let doc = win.document;
 	let panel = createXULElement(doc, "panel");
 	panel.id = STATUS_PANEL_ID;
@@ -418,7 +418,6 @@ function createStatusPanel(win, anchor) {
 	let panelState = {
 		window: win,
 		panel,
-		anchor,
 		title,
 		stage,
 		progress,
@@ -437,10 +436,29 @@ function createStatusPanel(win, anchor) {
 	return panelState;
 }
 
-function openStatusPanel(win, anchor) {
-	let panelState = STATUS_PANELS.get(win) || createStatusPanel(win, anchor);
-	panelState.anchor = anchor;
-	panelState.panel.openPopup(anchor, "after_end", 0, 0, false, false);
+function getStatusPanelAnchor(win) {
+	let doc = win.document;
+	return doc.getElementById("zotero-tb-container") || doc.documentElement;
+}
+
+function openStatusPanel(win) {
+	let panelState = STATUS_PANELS.get(win) || createStatusPanel(win);
+	win.setTimeout(() => {
+		try {
+			panelState.panel.openPopup(
+				getStatusPanelAnchor(win),
+				"after_end",
+				0,
+				0,
+				false,
+				false
+			);
+		}
+		catch (e) {
+			Zotero.logError(e);
+			log("falha ao abrir painel de status: " + (e && e.message ? e.message : e));
+		}
+	}, 0);
 }
 
 function installStatusMenu(win) {
@@ -456,7 +474,7 @@ function installStatusMenu(win) {
 	let item = createXULElement(doc, "menuitem");
 	item.id = STATUS_MENU_ID;
 	item.setAttribute("label", "Status da sincronização Zotero");
-	item.addEventListener("command", () => openStatusPanel(win, item));
+	item.addEventListener("command", () => openStatusPanel(win));
 	toolsPopup.appendChild(item);
 }
 
