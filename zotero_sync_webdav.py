@@ -50,7 +50,7 @@ import atexit
 import configparser
 import hashlib
 import heapq
-from difflib import SequenceMatcher
+from operator import itemgetter
 import io
 import json
 import logging
@@ -3785,13 +3785,10 @@ def select_recent_web_cache_candidates(
     selected_bytes = 0
     for candidate in sorted(
         candidates,
-        key=lambda entry: (
-            str(entry.get("date_added") or ""),
-            str(entry.get("source_attachment_key") or ""),
-        ),
+        key=itemgetter("date_added", "source_attachment_key"),
         reverse=True,
     ):
-        size_bytes = int(candidate.get("size_bytes") or 0)
+        size_bytes = candidate["size_bytes"]
         if size_bytes <= 0 or size_bytes > budget_bytes:
             continue
         if selected_bytes + size_bytes > budget_bytes:
