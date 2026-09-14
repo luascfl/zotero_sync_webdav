@@ -215,6 +215,22 @@
         "A missing or malformed snapshot is shown as an explicit unavailable state; opening the panel never starts, stops, or modifies a sync.",
         "Unit tests cover snapshot contents and failure states without a live Zotero API call; JavaScript syntax validation covers the extension source."
       ]
+    },
+    {
+      "id": "US-009",
+      "title": "Maintain a recent-PDF Zotero Web cache",
+      "status": "in_progress",
+      "dependsOn": [
+        "US-004"
+      ],
+      "description": "As an operator, I want the normal WebDAV synchronizer to keep a bounded copy of my most recently added readable PDFs in a private Zotero group so they remain readable on zotero.org without modifying the complete primary library.",
+      "acceptanceCriteria": [
+        "Enable the cache only when a configured private group ID is present; the primary library, its WebDAV files, and local copies remain immutable from the cache path.",
+        "Select eligible primary-library PDFs by descending dateAdded and a configurable 270 MiB default budget, skipping unavailable local copies and individual files too large for the budget.",
+        "Create cache-only records in the group, upload their PDFs through group Zotero Storage, and remove only previously marked cache-only records that fall outside the selected set.",
+        "Failures in the cache path are explicit in the final report but never delete source-library records or make the core WebDAV reconciliation destructive.",
+        "Unit tests cover recency selection, byte-budget boundaries, unavailable files, and cache-only deletion planning without live Zotero calls."
+      ]
     }
   ]
 }

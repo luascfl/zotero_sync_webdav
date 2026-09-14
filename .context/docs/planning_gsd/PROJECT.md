@@ -46,3 +46,16 @@ Story order:
 Dependencies:
 - Milestones 1–3 complete.
 - The existing extension and desktop connector remain the integration boundary.
+
+## Milestone 5: Zotero Web recency cache
+Status: in progress.
+
+Goal:
+Maintain a bounded, read-only-in-practice cache group in Zotero File Storage containing the most recently added readable PDFs from the primary library, without changing the primary library, local storage, or WebDAV.
+
+Story order:
+1. US-009: Reconcile a recent-PDF Zotero Web cache group.
+
+Dependencies:
+- Milestone 4 complete.
+- The private cache group ID is configured locally and reachable with the existing API key.

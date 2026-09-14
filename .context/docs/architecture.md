@@ -22,6 +22,7 @@ The primary topology is a local automation script that reads configuration from 
 - Reporting layer: console output, logging, daily log file, optional desktop notification.
 - Unified operations layer: the main script now exposes sync, diagnostics, duplicate cleanup, and autostart setup from one CLI.
 - Local status panel: the synchronizer atomically publishes a compact JSON snapshot at `~/.cache/zotero_sync_webdav/sync_status.json`; the existing `zotero-sync-recognizer` extension opens one reusable native Zotero status window from Tools and reads that snapshot only while the window is visible. The window has no control path to start, stop, or modify a synchronization.
+- Zotero Web recency cache: when `ZOTERO_WEB_CACHE_GROUP_ID` is locally configured, the main synchronizer copies only the most recently added PDFs with existing local files into that private group through Zotero File Storage. The default 270 MiB budget leaves capacity headroom; cache-only parent records carry `zotero-sync:web-cache` plus source keys and hashes, so cleanup never targets the primary library, WebDAV, or unmarked group content.
 - Support utilities: unified collection routing, removing the need for a separate physical Obsidian mirror since `zoterodb` serves as the primary vault.
 
 ## Core Architecture Paradigm: Unified Vault

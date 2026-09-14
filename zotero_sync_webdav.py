@@ -104,12 +104,14 @@ LIBRARY_ID = ""
 LIBRARY_TYPE = "user"
 API_KEY = ""
 TARGET_FOLDER_RAW = ""
-TARGET_FOLDER = ""
+WEB_CACHE_GROUP_ID = ""
+WEB_CACHE_BUDGET_BYTES = 270 * 1024 * 1024
 
 _config_loaded = False
 
 def load_config() -> None:
-    global LIBRARY_ID, LIBRARY_TYPE, API_KEY, TARGET_FOLDER_RAW, TARGET_FOLDER, _config_loaded
+    global LIBRARY_ID, LIBRARY_TYPE, API_KEY, TARGET_FOLDER_RAW, TARGET_FOLDER
+    global WEB_CACHE_GROUP_ID, WEB_CACHE_BUDGET_BYTES, _config_loaded
     if _config_loaded:
         return
     
@@ -125,7 +127,11 @@ def load_config() -> None:
     API_KEY = os.environ.get("ZOTERO_API_KEY", "")
     TARGET_FOLDER_RAW = os.environ.get("ZOTERO_SYNC_TARGET_FOLDER", "")
     TARGET_FOLDER = resolve_target_folder(TARGET_FOLDER_RAW)
-
+    WEB_CACHE_GROUP_ID = os.environ.get("ZOTERO_WEB_CACHE_GROUP_ID", "").strip()
+    WEB_CACHE_BUDGET_BYTES = get_env_int(
+        "ZOTERO_WEB_CACHE_BUDGET_MIB",
+        270,
+    ) * 1024 * 1024
     if TARGET_FOLDER_RAW != TARGET_FOLDER:
         logging.info("Pasta alvo configurada: %s (valor original: %s)", TARGET_FOLDER, TARGET_FOLDER_RAW)
     else:
@@ -209,6 +215,9 @@ LOG_DESKTOP_FILE = os.path.join(
 SYNC_STATUS_FILE = os.path.join(CACHE_DIR, "sync_status.json")
 SYNC_STATUS_SCHEMA_VERSION = 1
 SYNC_STATUS_PROGRESS_INTERVAL = 5
+
+WEB_CACHE_TAG = "zotero-sync:web-cache"
+WEB_CACHE_SOURCE_EXTRA_PREFIX = "Zotero Sync Web Cache source attachment: "
 
 HASH_CACHE: Dict[str, dict] = {}
 
@@ -3699,6 +3708,273 @@ def download_zotero_attachment_to_local(
     return dest_file
 
 
+WEB_CACHE_COPY_EXCLUDED_FIELDS = {
+    "key",
+    "version",
+    "library",
+    "dateAdded",
+    "dateModified",
+    "collections",
+    "relations",
+    "parentItem",
+    "inPublications",
+}
+
+
+def web_cache_enabled() -> bool:
+    """Indica se a cópia limitada para leitura no Zotero Web foi configurada."""
+    load_config()
+    return bool(WEB_CACHE_GROUP_ID and WEB_CACHE_BUDGET_BYTES > 0)
+
+
+def get_web_cache_source_path(item: dict) -> str | None:
+    """Resolve somente uma cópia local já existente, sem baixar conteúdo para o cache."""
+    path = get_attachment_file_path(item)
+    if path and os.path.isfile(path):
+        return path
+    data = item.get("data", {})
+    key = item.get("key") or data.get("key")
+    if not key:
+        return None
+    fallback = get_latest_pdf_path(os.path.join(LOCAL_COPY_DIR, key))
+    return fallback if fallback and os.path.isfile(fallback) else None
+
+
+def build_web_cache_candidates(
+    attachments: list[dict],
+    parent_items_by_key: dict[str, dict],
+) -> list[dict]:
+    """Lista PDFs locais da biblioteca principal elegíveis ao cache do Zotero Web."""
+    candidates: list[dict] = []
+    for attachment in attachments:
+        data = attachment.get("data", {})
+        key = attachment.get("key") or data.get("key")
+        if not key or not attachment_is_pdf(attachment):
+            continue
+        local_path = get_web_cache_source_path(attachment)
+        if not local_path:
+            continue
+        try:
+            size_bytes = os.path.getsize(local_path)
+        except OSError:
+            continue
+        parent_key = str(data.get("parentItem") or "")
+        parent = parent_items_by_key.get(parent_key)
+        date_added = str(data.get("dateAdded") or (parent or {}).get("data", {}).get("dateAdded") or "")
+        candidates.append(
+            {
+                "source_attachment_key": str(key),
+                "source_parent_key": parent_key,
+                "source_attachment": attachment,
+                "source_parent": parent,
+                "source_md5": str(data.get("md5") or ""),
+                "local_path": local_path,
+                "size_bytes": size_bytes,
+                "date_added": date_added,
+            }
+        )
+    return candidates
+
+
+def select_recent_web_cache_candidates(
+    candidates: list[dict],
+    budget_bytes: int,
+) -> tuple[list[dict], int]:
+    """Seleciona PDFs recentes por data de adição sem ultrapassar o orçamento."""
+    selected: list[dict] = []
+    selected_bytes = 0
+    for candidate in sorted(
+        candidates,
+        key=lambda entry: (
+            str(entry.get("date_added") or ""),
+            str(entry.get("source_attachment_key") or ""),
+        ),
+        reverse=True,
+    ):
+        size_bytes = int(candidate.get("size_bytes") or 0)
+        if size_bytes <= 0 or size_bytes > budget_bytes:
+            continue
+        if selected_bytes + size_bytes > budget_bytes:
+            continue
+        selected.append(candidate)
+        selected_bytes += size_bytes
+    return selected, selected_bytes
+
+
+def web_cache_source_marker(item: dict) -> tuple[str, str]:
+    """Extrai a chave e o MD5 de origem de um pai criado exclusivamente para o cache."""
+    extra = str(item.get("data", {}).get("extra") or "")
+    source_key = ""
+    source_md5 = ""
+    for line in extra.splitlines():
+        if line.startswith(WEB_CACHE_SOURCE_EXTRA_PREFIX):
+            source_key = line.removeprefix(WEB_CACHE_SOURCE_EXTRA_PREFIX).strip()
+        elif line.startswith("Zotero Sync Web Cache source MD5: "):
+            source_md5 = line.removeprefix("Zotero Sync Web Cache source MD5: ").strip()
+    return source_key, source_md5
+
+
+def collect_web_cache_parent_items(cache_zot: zotero.Zotero) -> list[dict]:
+    """Busca todos os pais marcados pelo sincronizador no grupo de cache."""
+    page_size = 100
+    start = 0
+    items: list[dict] = []
+    while True:
+        page = cache_zot.top(
+            tag=WEB_CACHE_TAG,
+            limit=page_size,
+            start=start,
+            sort="dateAdded",
+            direction="desc",
+        )
+        if not page:
+            return items
+        items.extend(page)
+        if len(page) < page_size:
+            return items
+        start += page_size
+
+
+def plan_web_cache_reconciliation(
+    selected_candidates: list[dict],
+    cached_parent_items: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Retorna PDFs a enviar e pais de cache marcados que podem ser removidos."""
+    selected_by_key = {
+        candidate["source_attachment_key"]: candidate
+        for candidate in selected_candidates
+    }
+    cached_by_source: dict[str, list[dict]] = {}
+    for item in cached_parent_items:
+        source_key, _ = web_cache_source_marker(item)
+        if source_key:
+            cached_by_source.setdefault(source_key, []).append(item)
+
+    additions: list[dict] = []
+    removals: list[dict] = []
+    for source_key, candidate in selected_by_key.items():
+        existing = cached_by_source.pop(source_key, [])
+        matching = [
+            item for item in existing
+            if web_cache_source_marker(item)[1] == candidate["source_md5"]
+        ]
+        if matching:
+            removals.extend(item for item in existing if item is not matching[0])
+        else:
+            removals.extend(existing)
+            additions.append(candidate)
+    for stale_items in cached_by_source.values():
+        removals.extend(stale_items)
+    return additions, removals
+
+
+def build_web_cache_parent_payload(candidate: dict) -> dict:
+    """Clona metadados bibliográficos mínimos para um item que pertence só ao cache."""
+    source_parent = candidate.get("source_parent") or {}
+    source_data = source_parent.get("data") or {}
+    payload = {
+        key: value
+        for key, value in source_data.items()
+        if key not in WEB_CACHE_COPY_EXCLUDED_FIELDS
+    }
+    attachment_data = candidate["source_attachment"].get("data", {})
+    payload["itemType"] = payload.get("itemType") or "document"
+    payload["title"] = payload.get("title") or attachment_data.get("title") or attachment_data.get("filename") or candidate["source_attachment_key"]
+    tags = list(payload.get("tags") or [])
+    if not any(isinstance(tag, dict) and tag.get("tag") == WEB_CACHE_TAG for tag in tags):
+        tags.append({"tag": WEB_CACHE_TAG})
+    payload["tags"] = tags
+    existing_extra = str(payload.get("extra") or "").strip()
+    marker_lines = [
+        f"{WEB_CACHE_SOURCE_EXTRA_PREFIX}{candidate['source_attachment_key']}",
+        f"Zotero Sync Web Cache source MD5: {candidate['source_md5']}",
+    ]
+    payload["extra"] = "\n".join(line for line in [existing_extra, *marker_lines] if line)
+    return payload
+
+
+def created_item_key(result: dict) -> str | None:
+    """Extrai a chave do primeiro item criado pelas respostas do Pyzotero."""
+    success = (result or {}).get("success") or {}
+    if isinstance(success, dict):
+        key = success.get("0") or next(iter(success.values()), None)
+        return str(key) if key else None
+    return None
+
+
+def delete_web_cache_parent(cache_zot: zotero.Zotero, parent: dict) -> None:
+    """Remove somente um pai anteriormente marcado como cache, com seus filhos."""
+    cache_zot.delete_item(parent)
+
+
+def reconcile_zotero_web_cache(
+    attachments: list[dict],
+    parent_items_by_key: dict[str, dict],
+    stats: dict,
+) -> None:
+    """Mantém a cópia recente e limitada para leitura web em grupo privado separado."""
+    stats.setdefault("web_cache_selected", 0)
+    stats.setdefault("web_cache_selected_bytes", 0)
+    stats.setdefault("web_cache_uploaded", 0)
+    stats.setdefault("web_cache_removed", 0)
+    stats.setdefault("web_cache_errors", 0)
+    stats.setdefault("web_cache_skipped_unavailable", 0)
+    if not web_cache_enabled():
+        return
+
+    candidates = build_web_cache_candidates(attachments, parent_items_by_key)
+    stats["web_cache_skipped_unavailable"] += sum(
+        1 for item in attachments if attachment_is_pdf(item)
+    ) - len(candidates)
+    selected, selected_bytes = select_recent_web_cache_candidates(
+        candidates,
+        WEB_CACHE_BUDGET_BYTES,
+    )
+    stats["web_cache_selected"] = len(selected)
+    stats["web_cache_selected_bytes"] = selected_bytes
+    cache_zot = zotero.Zotero(WEB_CACHE_GROUP_ID, "group", API_KEY)
+    cached_parents = collect_web_cache_parent_items(cache_zot)
+    additions, removals = plan_web_cache_reconciliation(selected, cached_parents)
+
+    for parent in removals:
+        try:
+            delete_web_cache_parent(cache_zot, parent)
+            stats["web_cache_removed"] += 1
+        except Exception as exc:
+            stats["web_cache_errors"] += 1
+            logging.error("[WEB-CACHE] Falha ao remover item de cache key=%s: %s", parent.get("key"), exc)
+
+    for candidate in additions:
+        parent_key = None
+        try:
+            parent_key = created_item_key(
+                cache_zot.create_items([build_web_cache_parent_payload(candidate)])
+            )
+            if not parent_key:
+                raise RuntimeError("A API não retornou chave para o pai do cache.")
+            result = cache_zot.attachment_simple(
+                [candidate["local_path"]],
+                parentid=parent_key,
+            )
+            if not (result or {}).get("success"):
+                raise RuntimeError("Upload do PDF para o cache não retornou sucesso.")
+            stats["web_cache_uploaded"] += 1
+        except Exception as exc:
+            stats["web_cache_errors"] += 1
+            logging.error(
+                "[WEB-CACHE] Falha ao copiar anexo %s para o cache: %s",
+                candidate["source_attachment_key"],
+                exc,
+            )
+            if parent_key:
+                try:
+                    delete_web_cache_parent(cache_zot, cache_zot.item(parent_key))
+                except Exception as cleanup_exc:
+                    logging.error(
+                        "[WEB-CACHE] Falha ao limpar pai incompleto %s: %s",
+                        parent_key,
+                        cleanup_exc,
+                    )
 def build_drive_pdf_index(directory: str, stats: dict | None = None) -> tuple[dict, dict, dict, dict, dict]:
     """Indexa PDFs atuais do drive por nome, caminho relativo e hash."""
     name_index: dict[str, str] = {}
@@ -5383,7 +5659,6 @@ def run_recover_orphans_mode(dry_run: bool = False) -> None:
         'renamed_webdav': 0,
         'moved_drive_files_to_collection': 0,
     }
-    
     (all_attachments, existing_filenames, existing_filenames_aggressive) = collect_all_attachments(zot, stats)
     
     collections = fetch_zotero_collections(zot)
@@ -5659,6 +5934,12 @@ def run_sync_mode(notification_policy: dict | None = None):
         'review_tags_applied': 0,
         'review_tags_removed': 0,
         'current_review_duplicate_keys': set(),
+        'web_cache_selected': 0,
+        'web_cache_selected_bytes': 0,
+        'web_cache_uploaded': 0,
+        'web_cache_removed': 0,
+        'web_cache_errors': 0,
+        'web_cache_skipped_unavailable': 0,
     }
     stats["sync_started_at"] = datetime.now(timezone.utc).isoformat()
     publish_sync_status(stats, "running", "Preparando sincronização")
@@ -6402,6 +6683,21 @@ def run_sync_mode(notification_policy: dict | None = None):
         logging.error(f"Erro ao processar arquivos da pasta: {e}")
         finalize_execution(stats)
         return
+    if web_cache_enabled():
+        try:
+            publish_sync_status(stats, "running", "Atualizando cache de leitura web")
+            cache_attachments, _, _ = collect_all_attachments(zot, stats)
+            cache_parents = build_item_by_key(
+                collect_all_bibliographic_items(zot, stats)
+            )
+            reconcile_zotero_web_cache(
+                cache_attachments,
+                cache_parents,
+                stats,
+            )
+        except Exception as exc:
+            stats["web_cache_errors"] += 1
+            logging.error("[WEB-CACHE] Reconciliação interrompida: %s", exc)
 
     # 5. Relatório final
     total_verificados = stats['processed'] or stats['folder_checked_pdfs']
@@ -6473,6 +6769,12 @@ def run_sync_mode(notification_policy: dict | None = None):
 │ 🧹 Duplicatas Zotero remov.: {stats['auto_removed_bibliographic_duplicates']:<17} │
 │ 🔀 Metadados mesclados: {stats['merged_duplicate_metadata']:<24} │
 │ ⏸️  Limpezas ignoradas: {stats['auto_duplicate_cleanup_skipped']:<24} │
+│ Cache web selecionados: {stats['web_cache_selected']:<23} │
+│ Cache web previsto (bytes): {stats['web_cache_selected_bytes']:<12} │
+│ Cache web enviados: {stats['web_cache_uploaded']:<25} │
+│ Cache web removidos: {stats['web_cache_removed']:<25} │
+│ Cache web indisponíveis: {stats['web_cache_skipped_unavailable']:<19} │
+│ Cache web falhas: {stats['web_cache_errors']:<28} │
 └──────────────────────────────────────────────────────┘
 {tie_summary}
 
