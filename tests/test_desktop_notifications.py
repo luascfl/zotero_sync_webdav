@@ -66,6 +66,31 @@ class DesktopNotificationTests(unittest.TestCase):
             check=False,
         )
 
+    def test_completion_notification_runs_log_opener_after_popup_action(self):
+        log_path = "/home/lucas/.cache/zotero_sync_webdav/logs/zotero_sync_today.log"
+        stats = {"added": 3, "skipped": 1, "errors": 0}
+
+        with patch.object(
+            zsync.shutil, "which", return_value="/usr/bin/dunstify"
+        ) as mock_which:
+            with patch.object(zsync.subprocess, "Popen") as mock_popen:
+                with patch.object(zsync, "send_desktop_notification") as mock_notify:
+                    zsync.send_completion_notification(stats, log_path)
+
+        mock_which.assert_called_once_with("dunstify")
+        mock_notify.assert_not_called()
+        command = mock_popen.call_args.args[0]
+        self.assertEqual(command[:3], ["/bin/sh", "-c", command[2]])
+        self.assertEqual(command[4:9], [
+            "/usr/bin/dunstify",
+            "Zotero Sync",
+            "text-x-log",
+            "open-log",
+            "Abrir log",
+        ])
+        self.assertEqual(command[-2:], ["xdg-open", log_path])
+        self.assertIn("Clique para abrir o log de hoje.", command[10])
+
     def test_pending_queue_body_uses_singular_and_plural_wording(self):
         cases = [
             (

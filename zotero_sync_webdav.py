@@ -565,6 +565,53 @@ def ensure_log_desktop_entry(log_path: str) -> str | None:
     return LOG_DESKTOP_ID
 
 
+def send_desktop_notification_action(
+    summary: str,
+    body: str,
+    icon: str,
+    action_name: str,
+    action_label: str,
+    command: list[str],
+) -> bool:
+    """Envia uma notificação cujo clique executa o comando fornecido."""
+    dunstify = shutil.which("dunstify")
+    if not dunstify or not command:
+        return False
+
+    action_runner = """\
+action="$("$1" -a "$2" -i "$3" -A "$4,$5" --block "$6" "$7" 2>/dev/null || true)"
+if [ "$action" = "$4" ]; then
+    shift 7
+    exec "$@"
+fi
+"""
+    try:
+        subprocess.Popen(
+            [
+                "/bin/sh",
+                "-c",
+                action_runner,
+                "zotero-notification-action",
+                dunstify,
+                "Zotero Sync",
+                icon,
+                action_name,
+                action_label,
+                summary,
+                body,
+                *command,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except OSError as exc:
+        logging.warning("[NOTIFY] Falha ao iniciar ação de notificação: %s", exc)
+        return False
+
+
 def send_desktop_notification(
     summary: str,
     body: str,
@@ -773,13 +820,23 @@ def build_completion_notification_body(stats: dict, log_path: str | None) -> str
 
 
 def send_completion_notification(stats: dict, log_path: str | None) -> None:
-    """Envia notificação sobre a execução e oferece abertura rápida do log."""
-    desktop_hint = ensure_log_desktop_entry(log_path) if log_path else None
+    """Envia notificação sobre a execução e abre o log quando acionada."""
+    body = build_completion_notification_body(stats, log_path)
+    if log_path and send_desktop_notification_action(
+        COMPLETION_NOTIFICATION_SUMMARY,
+        body,
+        "text-x-log",
+        "open-log",
+        "Abrir log",
+        ["xdg-open", os.path.abspath(log_path)],
+    ):
+        return
+
     send_desktop_notification(
         COMPLETION_NOTIFICATION_SUMMARY,
-        build_completion_notification_body(stats, log_path),
+        build_completion_notification_body(stats, None),
         icon="text-x-log",
-        desktop_hint=desktop_hint,
+        desktop_hint=None,
     )
 
 
