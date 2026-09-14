@@ -33,6 +33,47 @@ class WebCachePolicyTests(unittest.TestCase):
         self.assertEqual([item["source_attachment_key"] for item in selected], ["fits"])
         self.assertEqual(selected_bytes, 120)
 
+    def test_existing_group_storage_file_counts_as_cache_upload(self):
+        self.assertTrue(zsync.web_cache_upload_succeeded({"success": [{}]}))
+        self.assertTrue(zsync.web_cache_upload_succeeded({"unchanged": [{}]}))
+        self.assertFalse(zsync.web_cache_upload_succeeded({"failure": [{}]}))
+
+    def test_upload_uses_basename_with_source_parent_directory(self):
+        calls = {}
+
+        class FakeCache:
+            @staticmethod
+            def _attachment_template(item_type):
+                calls["item_type"] = item_type
+                return {}
+
+        class FakeUpload:
+            def __init__(self, cache_zot, payload, parentid, basedir):
+                calls["cache_zot"] = cache_zot
+                calls["payload"] = payload
+                calls["parentid"] = parentid
+                calls["basedir"] = basedir
+
+            @staticmethod
+            def upload():
+                return {"success": [{}]}
+
+        original_upload = zsync.zotero.Zupload
+        zsync.zotero.Zupload = FakeUpload
+        try:
+            result = zsync.upload_web_cache_attachment(
+                FakeCache(), "/source/nested/recent.pdf", "CACHEPARENT"
+            )
+        finally:
+            zsync.zotero.Zupload = original_upload
+
+        self.assertEqual(result, {"success": [{}]})
+        self.assertEqual(calls["item_type"], "imported_file")
+        self.assertEqual(calls["payload"][0]["title"], "recent.pdf")
+        self.assertEqual(calls["payload"][0]["filename"], "recent.pdf")
+        self.assertEqual(calls["parentid"], "CACHEPARENT")
+        self.assertEqual(calls["basedir"], Path("/source/nested"))
+
     def test_candidates_require_existing_local_pdf(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "available.pdf"

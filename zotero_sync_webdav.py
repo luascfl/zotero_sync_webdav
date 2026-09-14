@@ -3955,6 +3955,28 @@ def created_item_key(result: dict) -> str | None:
         return str(key) if key else None
     return None
 
+def web_cache_upload_succeeded(result: dict | None) -> bool:
+    """Aceita upload efetivo ou arquivo já presente no armazenamento do grupo."""
+    return bool((result or {}).get("success") or (result or {}).get("unchanged"))
+
+
+def upload_web_cache_attachment(
+    cache_zot: zotero.Zotero,
+    local_path: str,
+    parent_key: str,
+) -> dict:
+    """Envia um PDF usando nome relativo no payload e seu diretório como base local."""
+    source_path = Path(local_path)
+    attachment = cache_zot._attachment_template("imported_file")
+    attachment["title"] = source_path.name
+    attachment["filename"] = source_path.name
+    return zotero.Zupload(
+        cache_zot,
+        [attachment],
+        parentid=parent_key,
+        basedir=source_path.parent,
+    ).upload()
+
 
 def delete_web_cache_parent(cache_zot: zotero.Zotero, parent: dict) -> None:
     """Remove somente um pai anteriormente marcado como cache, com seus filhos."""
@@ -4006,12 +4028,13 @@ def reconcile_zotero_web_cache(
             )
             if not parent_key:
                 raise RuntimeError("A API não retornou chave para o pai do cache.")
-            result = cache_zot.attachment_simple(
-                [candidate["local_path"]],
-                parentid=parent_key,
+            result = upload_web_cache_attachment(
+                cache_zot,
+                candidate["local_path"],
+                parent_key,
             )
-            if not (result or {}).get("success"):
-                raise RuntimeError("Upload do PDF para o cache não retornou sucesso.")
+            if not web_cache_upload_succeeded(result):
+                raise RuntimeError(f"Upload do PDF para o cache falhou: {result!r}")
             stats["web_cache_uploaded"] += 1
         except Exception as exc:
             stats["web_cache_errors"] += 1

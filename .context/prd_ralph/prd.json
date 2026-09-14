@@ -219,7 +219,7 @@
     {
       "id": "US-009",
       "title": "Maintain a recent-PDF Zotero Web cache",
-      "status": "in_progress",
+      "status": "done",
       "dependsOn": [
         "US-004"
       ],
