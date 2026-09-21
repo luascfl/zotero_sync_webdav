@@ -50,6 +50,7 @@ import atexit
 import configparser
 import hashlib
 import heapq
+from difflib import SequenceMatcher
 from operator import itemgetter
 import io
 import json
