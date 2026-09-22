@@ -767,19 +767,6 @@ class BibliographicMatchingTests(unittest.TestCase):
             "collections": ["FREEFORM", "NEWCOL"],
         }])
 
-    def test_remove_empty_directories_preserves_obsidian(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            empty = root / "A"
-            empty.mkdir()
-            protected = root / ".obsidian"
-            protected.mkdir()
-            stats = {}
-            removed = zsync.remove_empty_directories(root, stats, "removed")
-            self.assertEqual(removed, 1)
-            self.assertFalse(empty.exists())
-            self.assertTrue(protected.exists())
-            self.assertEqual(stats["removed"], 1)
 
     def test_collect_nonempty_directory_paths_ignores_empty_dirs(self):
         with tempfile.TemporaryDirectory() as temp_dir:

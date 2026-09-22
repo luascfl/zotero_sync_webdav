@@ -4854,30 +4854,6 @@ def ensure_directory_exists(path: str | Path, stats: dict | None = None, counter
     return True
 
 
-def remove_empty_directories(root: str | Path, stats: dict, counter_key: str) -> int:
-    """Remove diretórios vazios sob a raiz, preservando diretórios internos especiais."""
-    root = os.path.abspath(str(root))
-    stats.setdefault(counter_key, 0)
-    removed = 0
-    protected_names = {'.obsidian', '.trash', '.git', '__pycache__'}
-    if not os.path.isdir(root):
-        return 0
-    for current_root, dirnames, _ in os.walk(root, topdown=False):
-        for dirname in dirnames:
-            dir_path = os.path.join(current_root, dirname)
-            if dirname in protected_names:
-                continue
-            try:
-                if not os.path.isdir(dir_path) or os.path.islink(dir_path):
-                    continue
-                if any(os.scandir(dir_path)):
-                    continue
-                os.rmdir(dir_path)
-                removed += 1
-            except OSError:
-                continue
-    stats[counter_key] += removed
-    return removed
 
 
 def sync_item_collections_to_drive_collection(
@@ -6006,8 +5982,6 @@ def run_sync_mode(notification_policy: dict | None = None):
         'obsidian_pdfs_deduped': 0,
         'preprocessed_drive_copy_variants': 0,
         'blocked_drive_copy_variants': 0,
-        'removed_empty_drive_dirs': 0,
-        'removed_empty_obsidian_dirs': 0,
         'moved_drive_files_to_collection': 0,
         'review_tags_applied': 0,
         'review_tags_removed': 0,
@@ -6138,8 +6112,6 @@ def run_sync_mode(notification_policy: dict | None = None):
         collections = fetch_zotero_collections(zot)
         collection_by_key, collection_children, collection_path_to_key = build_collection_path_model(collections)
     obsidian_root = resolve_obsidian_mirror_target_root(None)
-    remove_empty_directories(TARGET_FOLDER, stats, 'removed_empty_drive_dirs')
-    remove_empty_directories(obsidian_root, stats, 'removed_empty_obsidian_dirs')
     ensure_collection_directories(collection_by_key, TARGET_FOLDER, obsidian_root, stats)
 
     ingest_obsidian_pdfs_to_drive(
@@ -6838,8 +6810,6 @@ def run_sync_mode(notification_policy: dict | None = None):
 │ Coleções alinhadas ao drive: {stats['drive_authoritative_collection_updates']:<13} │
 │ 🧹 Duplicados removidos: {stats['pruned_drive_duplicates']:<22} │
 │ ⬇️  Baixados do Zotero: {stats['downloaded_zotero']:<24} │
-│ Pastas vazias remov. drive: {stats['removed_empty_drive_dirs']:<13} │
-│ Pastas vazias remov. Obsidian: {stats['removed_empty_obsidian_dirs']:<9} │
 │ 📤 Materializados no drive: {stats['materialized_drive']:<20} │
 │ Etiquetas de revisão: +{stats['review_tags_applied']:<9} -{stats['review_tags_removed']:<10} │
 │ 🛑 Bloqueios anti-duplicata: {stats['blocked_duplicate_risk']:<18} │
