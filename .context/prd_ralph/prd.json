@@ -231,6 +231,38 @@
         "Failures in the cache path are explicit in the final report but never delete source-library records or make the core WebDAV reconciliation destructive.",
         "Unit tests cover recency selection, byte-budget boundaries, unavailable files, and cache-only deletion planning without live Zotero calls."
       ]
+    },
+    {
+      "id": "US-010",
+      "title": "Quarantine and audit trail for duplicate file removal",
+      "status": "done",
+      "dependsOn": [
+        "US-009"
+      ],
+      "description": "As the owner of the PDF library, I want every duplicate PDF the sync removes to go to a local quarantine with an audit record, so a wrong duplicate decision can be undone instead of losing the file.",
+      "acceptanceCriteria": [
+        "A quarantine_file() helper copies the file into ~/.cache/zotero_sync_webdav/quarantine/<YYYY-MM-DD>/, verifies size and SHA-256 of the copy, and only then removes the original; on any failure the original stays in place, the partial copy is removed, and the helper reports failure.",
+        "Each successful quarantine appends one JSON line to ~/.cache/zotero_sync_webdav/duplicate_actions.jsonl with timestamp, action, original path, kept path, SHA-256, reason, and quarantine path.",
+        "The three code paths that delete duplicate PDFs with os.remove (delete_redundant_webdav_duplicate, Obsidian redundant-copy dedup, and folder-dedup same-hash removal) go through quarantine_file(); a failed quarantine means the file is not deleted and the case is logged as a failure.",
+        "Quarantine date directories older than 30 days are purged at the start of a normal sync; only directories matching YYYY-MM-DD under the quarantine root are ever removed.",
+        "Unit tests cover: successful quarantine with manifest line, rollback leaving the original intact when removal fails, purge keeping recent and non-date directories, and delete_redundant_webdav_duplicate preserving the canonical file while quarantining the redundant one.",
+        "py_compile and the existing test suite show no new failures versus the pre-change baseline of 17 failing tests."
+      ],
+      "notes": "Zotero item deletion (zot.delete_item) is deliberately out of scope; it moves to US-011 with the Zotero trash flag."
+    },
+    {
+      "id": "US-011",
+      "title": "Read-only duplicates report and safer Zotero item removal",
+      "status": "todo",
+      "dependsOn": [
+        "US-010"
+      ],
+      "description": "As the owner of the library, I want a read-only report that classifies duplicates by content hash against Zotero collections, and I want bibliographic duplicates removed via the Zotero trash instead of permanent deletion.",
+      "acceptanceCriteria": [
+        "A duplicatas-relatorio subcommand prints, per same-hash group, each copy, the Zotero items and collections that own it, and a verdict (keep, stray, conflict) without writing anything.",
+        "Bibliographic duplicates matched only by title are reported, never auto-deleted; DOI matches keep the current merge behavior.",
+        "Zotero items removed by the duplicate cleanup are sent to the Zotero trash and recorded in duplicate_actions.jsonl."
+      ]
     }
   ]
 }

@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 
@@ -73,6 +74,17 @@ def make_attachment(
     return {"key": key, "data": data}
 
 class BibliographicMatchingTests(unittest.TestCase):
+    def setUp(self):
+        isolated = tempfile.TemporaryDirectory()
+        self.addCleanup(isolated.cleanup)
+        for name, value in (
+            ("QUARANTINE_DIR", os.path.join(isolated.name, "quarantine")),
+            ("DUPLICATE_ACTIONS_LOG", os.path.join(isolated.name, "actions.jsonl")),
+        ):
+            patcher = unittest.mock.patch.object(zsync, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_truncated_zotero_filename_selects_existing_parent(self):
         index = zsync.build_bibliographic_parent_index([
             make_item(

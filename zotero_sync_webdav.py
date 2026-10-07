@@ -68,7 +68,7 @@ import unicodedata
 import urllib.error
 import urllib.request
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
 from urllib.parse import unquote
@@ -192,6 +192,12 @@ LOCAL_COPY_DIR = os.path.join(os.path.expanduser("~"), "Zotero", "storage")
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "zotero_sync_webdav")
 CACHE_FILE = os.path.join(CACHE_DIR, "hash_cache.json")
 CACHE_VERSION = 1
+
+# Duplicatas removidas pelo sync vão para esta quarentena local, com um registro
+# JSONL de auditoria, para que uma decisão errada possa ser desfeita.
+QUARANTINE_DIR = os.path.join(CACHE_DIR, "quarantine")
+DUPLICATE_ACTIONS_LOG = os.path.join(CACHE_DIR, "duplicate_actions.jsonl")
+QUARANTINE_RETENTION_DAYS = 30
 
 REVIEW_DUPLICATE_TAG = "zotero-sync: revisar duplicata"
 ZOTERO_READONLY_UPDATE_FIELDS = {"lastRead", "dateAdded", "dateModified", "library"}
@@ -2730,6 +2736,96 @@ def remove_cache_entry(cache: Dict[str, dict], path: str) -> None:
     cache.pop(_normalize_cache_path(path), None)
 
 
+def record_duplicate_action(entry: dict) -> bool:
+    """Acrescenta uma linha JSON ao registro de auditoria de duplicatas."""
+    record = {"timestamp": datetime.now(timezone.utc).isoformat(), **entry}
+    try:
+        os.makedirs(os.path.dirname(DUPLICATE_ACTIONS_LOG), exist_ok=True)
+        with open(DUPLICATE_ACTIONS_LOG, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return True
+    except OSError as exc:
+        logging.warning("[QUARENTENA] Não foi possível gravar o registro de auditoria: %s", exc)
+        return False
+
+
+def quarantine_file(
+    path: str,
+    *,
+    action: str,
+    reason: str,
+    kept_path: str | None = None,
+    file_hash: str | None = None,
+) -> str | None:
+    """Move um arquivo para a quarentena local, verificando o conteúdo antes de remover o original.
+
+    Retorna o caminho na quarentena. Retorna None quando qualquer etapa falha; nesse
+    caso o original permanece intacto e nenhuma cópia parcial fica na quarentena.
+    """
+    quarantine_path: str | None = None
+    try:
+        original_hash = file_hash or compute_sha256(path)
+        if not original_hash:
+            logging.warning("[QUARENTENA] Sem hash para '%s'; arquivo mantido.", path)
+            return None
+        day_dir = os.path.join(QUARANTINE_DIR, datetime.now().strftime("%Y-%m-%d"))
+        os.makedirs(day_dir, exist_ok=True)
+        base_name = f"{original_hash[:12]}_{os.path.basename(path)}"
+        quarantine_path = os.path.join(day_dir, base_name)
+        counter = 1
+        while os.path.exists(quarantine_path):
+            stem, ext = os.path.splitext(base_name)
+            quarantine_path = os.path.join(day_dir, f"{stem} ({counter}){ext}")
+            counter += 1
+        shutil.copy2(path, quarantine_path)
+        if compute_sha256(quarantine_path, cache={}) != original_hash:
+            raise OSError("cópia na quarentena não confere com o hash do original")
+        os.remove(path)
+    except OSError as exc:
+        logging.warning("[QUARENTENA] Falha ao quarentenar '%s'; original mantido: %s", path, exc)
+        if quarantine_path and os.path.exists(quarantine_path):
+            try:
+                os.remove(quarantine_path)
+            except OSError as cleanup_exc:
+                logging.warning("[QUARENTENA] Cópia parcial '%s' não removida: %s", quarantine_path, cleanup_exc)
+        return None
+
+    record_duplicate_action({
+        "action": action,
+        "reason": reason,
+        "path": path,
+        "kept_path": kept_path,
+        "sha256": original_hash,
+        "quarantine_path": quarantine_path,
+    })
+    logging.info("[QUARENTENA] '%s' movido para '%s' (%s).", path, quarantine_path, reason)
+    return quarantine_path
+
+
+def purge_quarantine(retention_days: int = QUARANTINE_RETENTION_DAYS, today: datetime | None = None) -> int:
+    """Remove da quarentena apenas pastas YYYY-MM-DD mais antigas que a retenção."""
+    if not os.path.isdir(QUARANTINE_DIR):
+        return 0
+    cutoff = (today or datetime.now()).date() - timedelta(days=retention_days)
+    purged = 0
+    for name in os.listdir(QUARANTINE_DIR):
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", name):
+            continue
+        try:
+            day = datetime.strptime(name, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        day_path = os.path.join(QUARANTINE_DIR, name)
+        if day >= cutoff or os.path.islink(day_path) or not os.path.isdir(day_path):
+            continue
+        try:
+            shutil.rmtree(day_path)
+            purged += 1
+        except OSError as exc:
+            logging.warning("[QUARENTENA] Não foi possível expirar '%s': %s", day_path, exc)
+    return purged
+
+
 def delete_redundant_webdav_duplicate(
     redundant_path: str,
     canonical_path: str,
@@ -2763,7 +2859,14 @@ def delete_redundant_webdav_duplicate(
         return False
 
     try:
-        os.remove(redundant_path)
+        if not quarantine_file(
+            redundant_path,
+            action="redundant_drive_duplicate",
+            reason="same_hash_as_canonical",
+            kept_path=canonical_path,
+            file_hash=redundant_hash,
+        ):
+            return False
         remove_cache_entry(HASH_CACHE, redundant_path)
         logging.info(
             "[RENOMEIO] Duplicado redundante removido do drive: '%s'. Canônico preservado: '%s'.",
@@ -5112,7 +5215,14 @@ def ingest_obsidian_pdfs_to_drive(
             dest_hash = compute_sha256(dest_path)
             if dest_hash and dest_hash == source_hash:
                 try:
-                    os.remove(entry["path"])
+                    if not quarantine_file(
+                        entry["path"],
+                        action="obsidian_redundant_copy",
+                        reason="same_hash_in_drive",
+                        kept_path=dest_path,
+                        file_hash=source_hash,
+                    ):
+                        raise OSError("quarentena falhou; original mantido")
                     remove_cache_entry(HASH_CACHE, entry["path"])
                     stats["obsidian_pdfs_deduped"] += 1
                     logging.info(
@@ -5912,8 +6022,15 @@ def preprocess_drive_duplicate_folders(target_folder: str, stats: dict) -> None:
                                 else:
                                     src_hash = compute_sha256(src_item)
                                     dst_hash = compute_sha256(dst_item)
-                                    if src_hash == dst_hash:
-                                        os.remove(src_item)
+                                    if src_hash and src_hash == dst_hash:
+                                        if not quarantine_file(
+                                            src_item,
+                                            action="folder_dedup_same_hash",
+                                            reason="same_hash_in_canonical_folder",
+                                            kept_path=dst_item,
+                                            file_hash=src_hash,
+                                        ):
+                                            logging.warning("[DEDUP-FOLDER] Quarentena falhou; '%s' mantido.", src_item)
                                     else:
                                         base, ext = os.path.splitext(item)
                                         shutil.move(src_item, os.path.join(canon_full_path, f"{base} (cópia){ext}"))
@@ -5935,6 +6052,7 @@ def run_sync_mode(notification_policy: dict | None = None):
         send_sync_progress_notification(build_first_open_sync_notification_body())
     ensure_single_instance()
     configure_pyzotero_upload_transport()
+    purge_quarantine()
     
     # 0. Preflight
     pf_errors = preflight_checks()

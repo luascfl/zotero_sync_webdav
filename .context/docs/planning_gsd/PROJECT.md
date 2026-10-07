@@ -48,7 +48,7 @@ Dependencies:
 - The existing extension and desktop connector remain the integration boundary.
 
 ## Milestone 5: Zotero Web recency cache
-Status: in progress.
+Status: complete. Completed on 2026-09-14.
 
 Goal:
 Maintain a bounded, read-only-in-practice cache group in Zotero File Storage containing the most recently added readable PDFs from the primary library, without changing the primary library, local storage, or WebDAV.
@@ -59,3 +59,17 @@ Story order:
 Dependencies:
 - Milestone 4 complete.
 - The private cache group ID is configured locally and reachable with the existing API key.
+
+## Milestone 6: Duplicate handling safety
+Status: in progress (US-010 done, US-011 pending).
+
+Goal:
+Make duplicate handling content-addressed and reversible. Today four mechanisms use filename similarity, two of them act without a report, and removals leave no audit trail or undo path.
+
+Story order:
+1. US-010: Quarantine and audit trail for duplicate file removal.
+2. US-011: Read-only duplicates report and safer Zotero item removal.
+
+Dependencies:
+- Milestone 5 complete.
+- The collection-flip guard (`find_ambiguous_drive_names`) is already in place.
