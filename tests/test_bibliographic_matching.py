@@ -768,6 +768,21 @@ class BibliographicMatchingTests(unittest.TestCase):
         }])
 
 
+    def test_collect_nonempty_directory_paths_ignores_notes_and_hidden_dirs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "blank").mkdir()
+            (root / "blank" / "nota.md").write_text("x", encoding="utf-8")
+            (root / ".obsidian").mkdir()
+            (root / ".obsidian" / "config.pdf").write_bytes(b"x")
+            (root / "Colecao").mkdir()
+            (root / "Colecao" / "a.PDF").write_bytes(b"x")
+            self.assertEqual(zsync.collect_nonempty_directory_paths(root), ["Colecao"])
+
+    def test_sanitize_folder_name_keeps_leading_dot(self):
+        self.assertEqual(zsync.sanitize_obsidian_folder_name(".obsidian", "fb"), ".obsidian")
+        self.assertEqual(zsync.sanitize_obsidian_folder_name("a/b.", "fb"), "a_b")
+
     def test_collect_nonempty_directory_paths_ignores_empty_dirs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

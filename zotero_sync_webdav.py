@@ -4675,7 +4675,7 @@ def print_obsidian_report(title: str, report: dict) -> None:
 
 def sanitize_obsidian_folder_name(name: str, fallback: str) -> str:
     clean = INVALID_OBSIDIAN_FS_CHARS.sub("_", name or "")
-    clean = re.sub(r"\\s+", " ", clean).strip(" .")
+    clean = re.sub(r"\\s+", " ", clean).lstrip(" ").rstrip(" .")
     return clean or fallback
 
 
@@ -4900,17 +4900,16 @@ def sync_item_collections_to_drive_collection(
         )
         return False
 def collect_nonempty_directory_paths(root: str | Path) -> list[str]:
-    """Lista diretórios relativos que têm conteúdo útil sob a raiz."""
+    """Lista diretórios relativos que contêm PDFs, ignorando pastas ocultas e notas do vault."""
     root = os.path.abspath(str(root))
     if not os.path.isdir(root):
         return []
-    protected_names = {'.obsidian', '.trash', '.git', '__pycache__'}
     discovered: set[str] = set()
     for current_root, dirnames, filenames in os.walk(root):
-        dirnames[:] = [name for name in dirnames if name not in protected_names]
+        dirnames[:] = [name for name in dirnames if not name.startswith('.') and name not in {'__pycache__'}]
         relative_dir = relpath_from_root(root, current_root)
-        has_files = any(not name.startswith('.') for name in filenames)
-        if has_files and relative_dir != '.':
+        has_pdfs = any(name.lower().endswith('.pdf') for name in filenames)
+        if has_pdfs and relative_dir != '.':
             discovered.add(relative_dir)
     return sorted(discovered, key=lambda value: (value.count('/'), value.casefold()))
 
