@@ -4387,6 +4387,22 @@ def materialize_zotero_attachments_to_drive(
             logging.error("[ZOT->DRIVE] Falha ao materializar anexo %s em '%s': %s", key, dest_path, exc)
 
 
+def find_ambiguous_drive_names(pdf_paths: List[str], drive_root: str) -> set[str]:
+    """Nomes de PDF (normalização agressiva) presentes em mais de uma pasta do drive.
+
+    Para esses nomes o caminho físico não identifica a coleção do item: a mesma
+    cópia em pastas diferentes faria a coleção Zotero alternar a cada varredura.
+    """
+    dirs_by_name: dict[str, set[str]] = {}
+    for path in pdf_paths:
+        name = normalize_aggressive(os.path.basename(path))
+        if not name:
+            continue
+        parent = os.path.dirname(relpath_from_root(drive_root, path))
+        dirs_by_name.setdefault(name, set()).add(normalize_relative_path_key(parent))
+    return {name for name, dirs in dirs_by_name.items() if len(dirs) > 1}
+
+
 def reconcile_drive_collection_paths(
     zot: zotero.Zotero,
     attachments: List[dict],
@@ -4397,6 +4413,7 @@ def reconcile_drive_collection_paths(
     drive_aggressive_index: dict[str, str],
     key_to_path: Dict[str, str],
     stats: dict,
+    ambiguous_drive_names: set[str],
 ) -> None:
     """Alinha a coleção do Zotero ao caminho real já existente no drive quando houver conteúdo."""
     stats.setdefault('drive_authoritative_collection_updates', 0)
@@ -4436,6 +4453,8 @@ def reconcile_drive_collection_paths(
             relative_drive_path,
             collection_path_to_key,
         )
+        if normalize_aggressive(os.path.basename(candidate_path)) in ambiguous_drive_names:
+            continue
         if not drive_collection_key or drive_collection_key == current_location['collection_key']:
             continue
 
@@ -6133,6 +6152,13 @@ def run_sync_mode(notification_policy: dict | None = None):
     hash_index, key_to_path = build_local_storage_index(existing_filenames)
     unindexed_local_hashes = build_unindexed_local_storage_hashes(key_to_path)
     drive_name_index_fast, drive_aggressive_index_fast, drive_path_index_fast, drive_path_aggressive_index_fast = build_drive_name_path_indexes(TARGET_FOLDER)
+    ambiguous_drive_names = find_ambiguous_drive_names(collect_all_pdfs(TARGET_FOLDER, stats), TARGET_FOLDER)
+    stats['ambiguous_drive_names'] = len(ambiguous_drive_names)
+    for ambiguous_name in sorted(ambiguous_drive_names):
+        logging.warning(
+            "[CONFLITO] PDF '%s' existe em mais de uma pasta do drive; coleção do item não será alterada automaticamente.",
+            ambiguous_name,
+        )
     reconcile_drive_collection_paths(
         zot,
         all_attachments,
@@ -6143,6 +6169,7 @@ def run_sync_mode(notification_policy: dict | None = None):
         drive_aggressive_index_fast,
         key_to_path,
         stats,
+        ambiguous_drive_names,
     )
     desktop_import_available = ensure_desktop_recognizer_available(stats)
 
@@ -6243,7 +6270,7 @@ def run_sync_mode(notification_policy: dict | None = None):
                 local_dir = os.path.join(LOCAL_COPY_DIR, zotero_key)
                 attachment_item = attachment_items_by_key.get(zotero_key)
                 attachment_parent_key = (attachment_item or {}).get('data', {}).get('parentItem')
-                if drive_collection_key:
+                if drive_collection_key and normalize_aggressive(file_name) not in ambiguous_drive_names:
                     target_item_key = attachment_parent_key or zotero_key
                     target_item = (
                         parent_items_by_key.get(attachment_parent_key)
@@ -6643,7 +6670,7 @@ def run_sync_mode(notification_policy: dict | None = None):
                 if local_path and os.path.exists(local_path):
                     register_local_hash(hash_index, key_to_path, new_key, local_path, info)
 
-                if parent_key and drive_collection_key and final_parent_key == parent_key:
+                if parent_key and drive_collection_key and final_parent_key == parent_key and normalize_aggressive(file_name) not in ambiguous_drive_names:
                     sync_item_collections_to_drive_collection(
                         zot,
                         parent_key,
@@ -6727,6 +6754,7 @@ def run_sync_mode(notification_policy: dict | None = None):
             drive_aggressive_index,
             key_to_path,
             stats,
+            ambiguous_drive_names,
         )
     except Exception as e:
         logging.error(f"Erro ao processar arquivos da pasta: {e}")

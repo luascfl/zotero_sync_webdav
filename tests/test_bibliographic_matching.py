@@ -779,6 +779,54 @@ class BibliographicMatchingTests(unittest.TestCase):
             (root / "Colecao" / "a.PDF").write_bytes(b"x")
             self.assertEqual(zsync.collect_nonempty_directory_paths(root), ["Colecao"])
 
+    def test_find_ambiguous_drive_names_flags_same_pdf_in_two_folders(self):
+        root = "/drive"
+        paths = [
+            "/drive/UNEB 2025.1/Etica/Cartilha avaliação.pdf",
+            "/drive/UNEB 2026.2/Avaliacao/Cartilha avaliacao.pdf",
+            "/drive/UNEB 2026.2/Avaliacao/Unico.pdf",
+            "/drive/UNEB 2026.2/Avaliacao/Unico.pdf",
+        ]
+        ambiguous = zsync.find_ambiguous_drive_names(paths, root)
+        self.assertEqual(ambiguous, {zsync.normalize_aggressive("Cartilha avaliacao.pdf")})
+
+    def test_reconcile_does_not_flip_collection_for_ambiguous_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            drive = Path(temp_dir) / "drive"
+            (drive / "B").mkdir(parents=True)
+            pdf = drive / "B" / "Doc.pdf"
+            pdf.write_bytes(b"same")
+            local = Path(temp_dir) / "local.pdf"
+            local.write_bytes(b"same")
+
+            class NoWriteZotero:
+                def item(self, key):
+                    raise AssertionError("coleção não deve ser consultada nem alterada")
+
+            attachment = {"key": "ATT1", "data": {
+                "key": "ATT1", "filename": "Doc.pdf", "contentType": "application/pdf",
+                "collections": ["COLA"],
+            }}
+            collections = {
+                "COLA": {"relative_path": "A", "name": "A"},
+                "COLB": {"relative_path": "B", "name": "B"},
+            }
+            name = zsync.normalize_filename("Doc.pdf")
+            aggressive = zsync.normalize_aggressive("Doc.pdf")
+            stats = {}
+            original_target = zsync.TARGET_FOLDER
+            zsync.TARGET_FOLDER = str(drive)
+            try:
+                zsync.reconcile_drive_collection_paths(
+                    NoWriteZotero(), [attachment], {}, collections,
+                    {"a": "COLA", "b": "COLB"},
+                    {name: str(pdf)}, {aggressive: str(pdf)},
+                    {"ATT1": str(local)}, stats, {aggressive},
+                )
+            finally:
+                zsync.TARGET_FOLDER = original_target
+            self.assertEqual(stats.get("drive_authoritative_collection_updates", 0), 0)
+
     def test_sanitize_folder_name_keeps_leading_dot(self):
         self.assertEqual(zsync.sanitize_obsidian_folder_name(".obsidian", "fb"), ".obsidian")
         self.assertEqual(zsync.sanitize_obsidian_folder_name("a/b.", "fb"), "a_b")
