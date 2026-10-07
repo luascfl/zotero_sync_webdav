@@ -27,9 +27,13 @@ This repository contains automation scripts for a personal Linux Zotero/WebDAV w
   ```bash
   python3 zotero_sync_webdav.py remove-duplicatas
   ```
-- Duplicate removal real run:
+- Duplicate removal real run (moves attachments to the Zotero trash, recoverable from the app):
   ```bash
   python3 zotero_sync_webdav.py remove-duplicatas --executar
+  ```
+- Read-only duplicates report (same-content PDFs classified against Zotero collections, plus bibliographic duplicates; changes nothing):
+  ```bash
+  python3 zotero_sync_webdav.py duplicatas-relatorio
   ```
 - Setup autostart:
   ```bash

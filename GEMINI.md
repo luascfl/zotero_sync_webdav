@@ -27,6 +27,7 @@ The main script now exposes integrated operational modes:
 - `python3 zotero_sync_webdav.py sync` or no args
 - `python3 zotero_sync_webdav.py diagnostico`
 - `python3 zotero_sync_webdav.py remove-duplicatas [--executar]`
+- `python3 zotero_sync_webdav.py duplicatas-relatorio`
 - `python3 zotero_sync_webdav.py setup-autostart`
 
 If tests are added, also run the narrow test command added by the story.

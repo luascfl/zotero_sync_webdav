@@ -2074,23 +2074,96 @@ def print_diagnostic_report(duplicate_groups: List[dict], missing_result: dict) 
     print(f"\n{'═'*60}\n")
 
 
+def zotero_library_prefix(zot: zotero.Zotero) -> str:
+    """Prefixo da biblioteca na API web, por exemplo https://api.zotero.org/users/123.
+
+    O pyzotero já guarda `library_type` no plural ('users' ou 'groups').
+    """
+    return f"{zot.endpoint}/{zot.library_type}/{zot.library_id}"
+
+
+def patch_item_deleted_flag(zot: zotero.Zotero, item_key: str, version: int | None) -> None:
+    """Move um único item para a lixeira do Zotero.
+
+    Só um PATCH direto com `deleted: 1` faz isso: o pyzotero rejeita o campo na validação
+    local e `delete_item` apaga de forma permanente. A API não leva os filhos junto.
+    """
+    if not version:
+        raise ValueError(f"versão ausente para o item {item_key}")
+    response = zot.client.patch(
+        f"{zotero_library_prefix(zot)}/items/{item_key}",
+        headers={
+            **zot.default_headers(),
+            "If-Unmodified-Since-Version": str(version),
+            "Content-Type": "application/json",
+        },
+        json={"deleted": 1},
+    )
+    response.raise_for_status()
+
+
+def move_item_to_zotero_trash(
+    zot: zotero.Zotero,
+    item_key: str,
+    *,
+    action: str,
+    reason: str,
+    kept_key: str | None = None,
+    title: str = "",
+) -> list[str]:
+    """Move um item e seus filhos para a lixeira do Zotero, recuperável pela interface.
+
+    Os filhos vão primeiro: se o pai falhar, o item fica sem anexos e a próxima limpeza o
+    reenvia à lixeira. A ordem inversa deixaria anexos vivos presos a um pai na lixeira.
+    Retorna as chaves dos filhos movidos. Qualquer falha propaga para o chamador.
+    """
+    trashed_children: list[str] = []
+    for child in zot.children(item_key):
+        child_data = child.get("data") or {}
+        if child_data.get("deleted"):
+            continue
+        child_key = child.get("key") or child_data.get("key")
+        patch_item_deleted_flag(zot, child_key, child.get("version") or child_data.get("version"))
+        trashed_children.append(child_key)
+
+    record = {
+        "reason": reason,
+        "item_key": item_key,
+        "kept_key": kept_key,
+        "title": title[:200],
+        "children_trashed": trashed_children,
+    }
+    try:
+        item = zot.item(item_key)
+        patch_item_deleted_flag(zot, item_key, item.get("version") or (item.get("data") or {}).get("version"))
+    except Exception:
+        record_duplicate_action({**record, "action": f"{action}_partial"})
+        raise
+    record_duplicate_action({**record, "action": action})
+    return trashed_children
+
+
 def delete_attachment_keys(zot: zotero.Zotero, keys: List[str], dry_run: bool) -> tuple[int, int]:
-    """Remove anexos pela chave, com dry-run opcional."""
+    """Move anexos para a lixeira do Zotero pela chave, com dry-run opcional."""
     deleted_ok = 0
     deleted_err = 0
     for key in keys:
         if dry_run:
-            print(f'    [DRY-RUN] Deletaria key={key}')
+            print(f'    [DRY-RUN] Moveria para a lixeira key={key}')
             deleted_ok += 1
             continue
         try:
-            item = zot.item(key)
-            zot.delete_item(item)
-            print(f'    ✅ Deletado: key={key}')
+            move_item_to_zotero_trash(
+                zot,
+                key,
+                action="manual_duplicate_attachment",
+                reason="remove-duplicatas --executar",
+            )
+            print(f'    Movido para a lixeira do Zotero: key={key}')
             deleted_ok += 1
             time.sleep(0.3)
         except Exception as exc:
-            print(f'    ❌ Falha ao deletar key={key}: {exc}')
+            print(f'    Falha ao mover para a lixeira key={key}: {exc}')
             deleted_err += 1
     return deleted_ok, deleted_err
 
@@ -2158,12 +2231,16 @@ def run_safe_bibliographic_duplicate_cleanup(
                 continue
 
             duplicate_summary = child_summaries.get(duplicate_key, {})
-            can_delete, reason = duplicate_item_can_be_deleted(
-                duplicate,
-                keeper,
-                duplicate_summary,
-                keeper_summary,
-            )
+            title_only_reason = bibliographic_group_auto_delete_block_reason(group['identity'])
+            if title_only_reason:
+                can_delete, reason = False, title_only_reason
+            else:
+                can_delete, reason = duplicate_item_can_be_deleted(
+                    duplicate,
+                    keeper,
+                    duplicate_summary,
+                    keeper_summary,
+                )
             if not can_delete:
                 stats['auto_duplicate_cleanup_skipped'] += 1
                 record_current_review_duplicate(stats, duplicate_key)
@@ -2198,11 +2275,18 @@ def run_safe_bibliographic_duplicate_cleanup(
                 if before_collections != after_collections or before_tags != after_tags:
                     stats['merged_duplicate_metadata'] += 1
 
-                zot.delete_item(duplicate['item'])
+                move_item_to_zotero_trash(
+                    zot,
+                    duplicate_key,
+                    action="bibliographic_duplicate_trashed",
+                    reason=f"duplicata por DOI; mestre={keeper_key}",
+                    kept_key=keeper_key,
+                    title=duplicate.get('title', ''),
+                )
                 stats['auto_removed_bibliographic_duplicates'] += 1
                 changed = True
                 logging.info(
-                    "[DUP-BIB] Duplicata bibliográfica removida automaticamente: key=%s title='%s' | mestre=%s.",
+                    "[DUP-BIB] Duplicata bibliográfica movida para a lixeira do Zotero: key=%s title='%s' | mestre=%s.",
                     duplicate_key,
                     duplicate.get('title', '')[:120],
                     keeper_key,
@@ -2214,6 +2298,217 @@ def run_safe_bibliographic_duplicate_cleanup(
                 logging.error("[DUP-BIB] Falha ao remover duplicata key=%s: %s", duplicate_key, exc)
 
     return changed
+
+
+def bibliographic_group_auto_delete_block_reason(identity: tuple[str, str] | None) -> str | None:
+    """Só duplicatas confirmadas por DOI podem ser removidas automaticamente."""
+    if identity and identity[0] == 'doi':
+        return None
+    return "duplicata identificada só pelo título; revisão manual necessária"
+
+
+def classify_duplicate_copies(copies: List[str], owners: List[dict]) -> dict:
+    """Classifica cópias de conteúdo idêntico contra as coleções dos itens Zotero que as usam.
+
+    `copies` são caminhos relativos ao drive. `owners` são itens Zotero com `collections`
+    como caminhos relativos de coleção. Vereditos:
+      stray    um item Zotero e exatamente uma cópia dentro de coleção dele; as outras são sobras
+      conflict itens distintos, cópias em várias coleções ou nenhuma em coleção: decisão humana
+      unowned  nenhum item Zotero referencia as cópias
+    """
+    review_roles = {path: 'review' for path in copies}
+    if not owners:
+        return {
+            'verdict': 'unowned',
+            'roles': review_roles,
+            'reason': 'nenhum item do Zotero referencia estas cópias',
+        }
+    if len(owners) > 1:
+        return {
+            'verdict': 'conflict',
+            'roles': review_roles,
+            'reason': f'{len(owners)} itens distintos do Zotero usam este conteúdo',
+        }
+    collection_keys = {normalize_relative_path_key(path) for path in owners[0].get('collections', [])}
+    in_collection = [
+        path for path in copies
+        if normalize_relative_path_key(os.path.dirname(path)) in collection_keys
+    ]
+    if len(in_collection) == 1:
+        keeper = in_collection[0]
+        return {
+            'verdict': 'stray',
+            'roles': {path: ('keep' if path == keeper else 'stray') for path in copies},
+            'reason': 'uma cópia está numa coleção do item; as outras estão fora das coleções dele',
+        }
+    reason = (
+        'nenhuma cópia está numa coleção do item'
+        if not in_collection
+        else 'o item tem cópias em mais de uma das suas coleções'
+    )
+    return {'verdict': 'conflict', 'roles': review_roles, 'reason': reason}
+
+
+def build_duplicates_report(
+    pdf_paths: List[str],
+    drive_root: str,
+    attachments: List[dict],
+    parent_items_by_key: dict[str, dict],
+    collection_by_key: dict[str, dict],
+    hash_fn=None,
+) -> List[dict]:
+    """Agrupa PDFs do drive por conteúdo e por nome e classifica cada grupo. Não altera nada."""
+    from collections import defaultdict
+
+    hash_fn = hash_fn or compute_sha256
+    relative = {path: relpath_from_root(drive_root, path) for path in pdf_paths}
+
+    owners_by_name: dict[str, dict[str, dict]] = defaultdict(dict)
+    for attachment in attachments:
+        if not attachment_is_pdf(attachment):
+            continue
+        name = normalize_aggressive(os.path.basename(get_filename_from_item(attachment)))
+        if not name:
+            continue
+        data = attachment.get('data', {})
+        parent_key = data.get('parentItem')
+        owner_key = parent_key or attachment.get('key') or data.get('key')
+        owner_item = parent_items_by_key.get(parent_key) if parent_key else attachment
+        collection_keys = item_collection_keys_from_context(attachment, parent_items_by_key)
+        owners_by_name[name][owner_key] = {
+            'key': owner_key,
+            'title': ((owner_item or attachment).get('data', {}).get('title') or ''),
+            'collections': [
+                collection_by_key[key]['relative_path']
+                for key in collection_keys
+                if key in collection_by_key
+            ],
+        }
+
+    def owners_for(paths: List[str]) -> List[dict]:
+        merged: dict[str, dict] = {}
+        for path in paths:
+            merged.update(owners_by_name.get(normalize_aggressive(os.path.basename(path)), {}))
+        return list(merged.values())
+
+    by_size: dict[int, list[str]] = defaultdict(list)
+    for path in pdf_paths:
+        try:
+            by_size[os.path.getsize(path)].append(path)
+        except OSError as exc:
+            logging.warning("[RELATORIO] Não foi possível ler o tamanho de '%s': %s", path, exc)
+    by_hash: dict[str, list[str]] = defaultdict(list)
+    for same_size in by_size.values():
+        if len(same_size) < 2:
+            continue
+        for path in same_size:
+            digest = hash_fn(path)
+            if digest:
+                by_hash[digest].append(path)
+
+    groups: list[dict] = []
+    for digest, paths in sorted(by_hash.items()):
+        if len(paths) < 2:
+            continue
+        copies = sorted(relative[path] for path in paths)
+        owners = owners_for(paths)
+        verdict = classify_duplicate_copies(copies, owners)
+        groups.append({
+            'kind': 'same_content',
+            'sha256': digest,
+            'verdict': verdict['verdict'],
+            'reason': verdict['reason'],
+            'copies': [{'path': path, 'role': verdict['roles'][path]} for path in copies],
+            'owners': owners,
+        })
+
+    ambiguous = find_ambiguous_drive_names(pdf_paths, drive_root)
+    by_name: dict[str, list[str]] = defaultdict(list)
+    for path in pdf_paths:
+        name = normalize_aggressive(os.path.basename(path))
+        if name in ambiguous:
+            by_name[name].append(path)
+    for _name, paths in sorted(by_name.items()):
+        digests = {hash_fn(path) for path in paths}
+        if None in digests:
+            verdict, reason = 'unverified', 'não foi possível calcular o hash de todas as cópias'
+        elif len(digests) > 1:
+            verdict, reason = 'conflict', 'mesmo nome em pastas diferentes com conteúdo diferente'
+        else:
+            continue
+        groups.append({
+            'kind': 'name_collision',
+            'sha256': None,
+            'verdict': verdict,
+            'reason': reason,
+            'copies': [{'path': relative[path], 'role': 'review'} for path in sorted(paths)],
+            'owners': owners_for(paths),
+        })
+    return groups
+
+
+def summarize_bibliographic_duplicate_groups(groups: List[dict]) -> List[dict]:
+    """Resume grupos de duplicatas bibliográficas e indica se a limpeza automática os tocaria."""
+    return [
+        {
+            'identity_kind': group['identity'][0],
+            'auto_removable': bibliographic_group_auto_delete_block_reason(group['identity']) is None,
+            'items': [{'key': entry['key'], 'title': entry.get('title', '')[:90]} for entry in group['items']],
+        }
+        for group in groups
+    ]
+
+
+def print_duplicates_report(groups: List[dict], bibliographic_groups: List[dict]) -> None:
+    verdict_labels = {
+        'stray': 'SOBRA IDENTIFICADA',
+        'conflict': 'CONFLITO, decisão manual',
+        'unowned': 'SEM ITEM NO ZOTERO',
+        'unverified': 'NÃO VERIFICADO',
+    }
+    role_labels = {'keep': 'manter', 'stray': 'sobra', 'review': 'revisar'}
+    print(f"\n{'=' * 60}\n  PDFs DUPLICADOS NO DRIVE: {len(groups)} grupo(s)\n{'=' * 60}")
+    for group in groups:
+        digest = f" sha256 {group['sha256'][:12]}" if group['sha256'] else ''
+        print(f"\n[{verdict_labels.get(group['verdict'], group['verdict'])}] {group['kind']}{digest}")
+        print(f"  {group['reason']}")
+        for copy in group['copies']:
+            print(f"  {role_labels[copy['role']]:>8}  {copy['path']}")
+        for owner in group['owners']:
+            collections = '; '.join(owner['collections']) or 'sem coleção'
+            print(f"  item {owner['key']} '{owner['title'][:60]}' em: {collections}")
+    strays = sum(1 for group in groups if group['verdict'] == 'stray')
+    print(f"\nResumo: {strays} grupo(s) com sobra identificada, {len(groups) - strays} para decisão manual.")
+    print("A coleção atual de um item pode refletir trocas antigas: confirme antes de apagar uma sobra.")
+    print(f"\n{'=' * 60}\n  ITENS BIBLIOGRÁFICOS DUPLICADOS: {len(bibliographic_groups)} grupo(s)\n{'=' * 60}")
+    for group in bibliographic_groups:
+        mode = 'elegível à limpeza automática (DOI)' if group['auto_removable'] else 'só relatório (título)'
+        print(f"\n[{group['identity_kind']}] {mode}")
+        for item in group['items']:
+            print(f"  {item['key']}  {item['title']}")
+    print()
+
+
+def run_duplicates_report_mode() -> None:
+    """Relatório somente leitura: não altera o drive nem o Zotero."""
+    from collections import defaultdict
+
+    zot = connect_zotero_client()
+    if not os.path.isdir(TARGET_FOLDER):
+        raise SystemExit(f'Pasta alvo não encontrada: {TARGET_FOLDER}')
+    stats: dict = defaultdict(int)
+    attachments, _, _ = collect_all_attachments(zot, stats)
+    bibliographic_items = collect_all_bibliographic_items(zot, stats)
+    parent_items_by_key = build_item_by_key(bibliographic_items)
+    collection_by_key, _, _ = build_collection_path_model(fetch_zotero_collections(zot))
+    pdf_paths = collect_all_pdfs(TARGET_FOLDER, stats)
+    groups = build_duplicates_report(
+        pdf_paths, TARGET_FOLDER, attachments, parent_items_by_key, collection_by_key,
+    )
+    bibliographic_groups = summarize_bibliographic_duplicate_groups(
+        build_bibliographic_duplicate_groups(build_bibliographic_parent_index(bibliographic_items))
+    )
+    print_duplicates_report(groups, bibliographic_groups)
 
 
 def connect_zotero_client() -> zotero.Zotero:
@@ -5734,7 +6029,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     remove_parser.add_argument(
         '--executar',
         action='store_true',
-        help='Apaga de verdade os anexos duplicados',
+        help='Move os anexos duplicados para a lixeira do Zotero',
+    )
+
+    subparsers.add_parser(
+        'duplicatas-relatorio',
+        help='Relatório somente leitura de PDFs duplicados por conteúdo e itens duplicados',
     )
 
 
@@ -7050,6 +7350,9 @@ def main(argv: List[str] | None = None) -> int:
     if args.command == 'remove-duplicatas':
         run_duplicate_cleanup_mode(execute=args.executar)
         return
+    if args.command == 'duplicatas-relatorio':
+        run_duplicates_report_mode()
+        return 0
     if args.command == 'setup-autostart':
         run_setup_autostart_mode(args.setup_args)
         return

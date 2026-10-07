@@ -61,7 +61,7 @@ Dependencies:
 - The private cache group ID is configured locally and reachable with the existing API key.
 
 ## Milestone 6: Duplicate handling safety
-Status: in progress (US-010 done, US-011 pending).
+Status: complete. Completed on 2026-10-07.
 
 Goal:
 Make duplicate handling content-addressed and reversible. Today four mechanisms use filename similarity, two of them act without a report, and removals leave no audit trail or undo path.

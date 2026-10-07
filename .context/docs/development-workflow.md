@@ -34,9 +34,13 @@ Use the GSD plus Ralph workflow for changes. GSD defines milestones and dependen
   ```bash
   python3 zotero_sync_webdav.py remove-duplicatas
   ```
-- Duplicate cleanup real run:
+- Duplicate cleanup real run (moves attachments to the Zotero trash, recoverable from the app):
   ```bash
   python3 zotero_sync_webdav.py remove-duplicatas --executar
+  ```
+- Read-only duplicates report:
+  ```bash
+  python3 zotero_sync_webdav.py duplicatas-relatorio
   ```
 - Setup autostart:
   ```bash

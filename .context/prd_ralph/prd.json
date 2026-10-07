@@ -253,13 +253,13 @@
     {
       "id": "US-011",
       "title": "Read-only duplicates report and safer Zotero item removal",
-      "status": "todo",
+      "status": "done",
       "dependsOn": [
         "US-010"
       ],
       "description": "As the owner of the library, I want a read-only report that classifies duplicates by content hash against Zotero collections, and I want bibliographic duplicates removed via the Zotero trash instead of permanent deletion.",
       "acceptanceCriteria": [
-        "A duplicatas-relatorio subcommand prints, per same-hash group, each copy, the Zotero items and collections that own it, and a verdict (keep, stray, conflict) without writing anything.",
+        "A duplicatas-relatorio subcommand prints, per same-content group (and per same-name, different-content group), each copy marked keep, stray or review, the owning Zotero items and their collections, and a verdict (stray, conflict, unowned, unverified) without writing to the drive or Zotero.",
         "Bibliographic duplicates matched only by title are reported, never auto-deleted; DOI matches keep the current merge behavior.",
         "Zotero items removed by the duplicate cleanup are sent to the Zotero trash and recorded in duplicate_actions.jsonl."
       ]
