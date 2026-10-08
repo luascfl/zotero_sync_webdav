@@ -1716,6 +1716,33 @@ def add_review_tag_to_item(
         return False
 
 
+class DriveScan:
+    """Uma varredura recursiva de PDFs por execução, reaproveitada pelas etapas do sync.
+
+    Cada varredura custa dezenas de segundos num mount rclone. Quem move, renomeia ou apaga
+    PDFs deve chamar `replace()` com a lista resultante ou `invalidate()`; nenhuma etapa
+    deve reutilizar a lista depois de mutar o drive sem fazer isso.
+    """
+
+    def __init__(self, root: str, stats: dict):
+        self.root = root
+        self.stats = stats
+        self.scans = 0
+        self._paths: List[str] | None = None
+
+    def paths(self) -> List[str]:
+        if self._paths is None:
+            self._paths = collect_all_pdfs(self.root, self.stats)
+            self.scans += 1
+        return self._paths
+
+    def replace(self, paths: List[str]) -> None:
+        self._paths = list(paths)
+
+    def invalidate(self) -> None:
+        self._paths = None
+
+
 def collect_all_pdfs(directory: str, stats: dict) -> List[str]:
     """Retorna todos os PDFs da pasta, incluindo subpastas, ordenados do mais recente ao mais antigo."""
     logging.info("[SCAN] Iniciando varredura recursiva de PDFs em %s", directory)
@@ -4503,14 +4530,19 @@ def build_drive_pdf_index(directory: str, stats: dict | None = None) -> tuple[di
     return name_index, aggressive_index, path_index, path_aggressive_index, hash_index
 
 
-def build_drive_name_path_indexes(directory: str) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+def build_drive_name_path_indexes(
+    directory: str,
+    pdf_paths: List[str] | None = None,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
     """Indexa o drive por nome e caminho relativo sem calcular hash."""
     name_index: dict[str, str] = {}
     aggressive_index: dict[str, str] = {}
     path_index: dict[str, str] = {}
     path_aggressive_index: dict[str, str] = {}
     temp_stats = {'folder_total_pdfs': 0, 'folder_checked_pdfs': 0}
-    for path in collect_all_pdfs(directory, temp_stats):
+    if pdf_paths is None:
+        pdf_paths = collect_all_pdfs(directory, temp_stats)
+    for path in pdf_paths:
         filename = os.path.basename(path)
         relative_path = relpath_from_root(directory, path)
         norm = normalize_filename(filename)
@@ -6438,9 +6470,9 @@ def run_sync_mode(notification_policy: dict | None = None):
     print("\nExecutando deduplicação e renomeio prévio no Drive...")
     preprocess_drive_duplicate_folders(TARGET_FOLDER, stats)
     
+    drive_scan = DriveScan(TARGET_FOLDER, stats)
     if os.path.isdir(TARGET_FOLDER):
-        _pre_files = collect_all_pdfs(TARGET_FOLDER, stats)
-        preprocess_drive_copy_variants(_pre_files, stats)
+        drive_scan.replace(preprocess_drive_copy_variants(drive_scan.paths(), stats))
 
     # 1. Conectar ao Zotero
     try:
@@ -6557,6 +6589,12 @@ def run_sync_mode(notification_policy: dict | None = None):
         collection_path_to_key,
         stats,
     )
+    # Ingestão move ou remove PDFs no drive: a varredura reaproveitada deixa de valer.
+    if (
+        stats.get("obsidian_pdfs_moved_to_drive", 0)
+        or stats.get("obsidian_pdfs_deduped", 0)
+    ):
+        drive_scan.invalidate()
 
     expected_path_index, expected_path_aggressive_index = build_expected_attachment_path_indexes(
         all_attachments,
@@ -6569,8 +6607,8 @@ def run_sync_mode(notification_policy: dict | None = None):
 
     hash_index, key_to_path = build_local_storage_index(existing_filenames)
     unindexed_local_hashes = build_unindexed_local_storage_hashes(key_to_path)
-    drive_name_index_fast, drive_aggressive_index_fast, drive_path_index_fast, drive_path_aggressive_index_fast = build_drive_name_path_indexes(TARGET_FOLDER)
-    ambiguous_drive_names = find_ambiguous_drive_names(collect_all_pdfs(TARGET_FOLDER, stats), TARGET_FOLDER)
+    drive_name_index_fast, drive_aggressive_index_fast, drive_path_index_fast, drive_path_aggressive_index_fast = build_drive_name_path_indexes(TARGET_FOLDER, drive_scan.paths())
+    ambiguous_drive_names = find_ambiguous_drive_names(drive_scan.paths(), TARGET_FOLDER)
     stats['ambiguous_drive_names'] = len(ambiguous_drive_names)
     for ambiguous_name in sorted(ambiguous_drive_names):
         logging.warning(
@@ -6603,7 +6641,7 @@ def run_sync_mode(notification_policy: dict | None = None):
         return
 
     try:
-        files_to_process = collect_all_pdfs(TARGET_FOLDER, stats)
+        files_to_process = drive_scan.paths()
 
         if not files_to_process:
             print("Nenhum arquivo PDF encontrado na pasta.")

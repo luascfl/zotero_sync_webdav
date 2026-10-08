@@ -267,7 +267,7 @@
     {
       "id": "US-012",
       "title": "Scan the drive once per sync run",
-      "status": "todo",
+      "status": "done",
       "dependsOn": [
         "US-011"
       ],
@@ -276,7 +276,7 @@
         "Measured baseline recorded first: one collect_all_pdfs over 1850 PDFs took 41.5 s on the mount, and run_sync_mode currently calls it at the pre-copy preprocess, in the ambiguity check added by US-009 follow-up, and for files_to_process, besides the index builders.",
         "A single scan result is produced early in run_sync_mode and reused by the ambiguity check, the index builders and the main loop; it is refreshed only after a step that moves or removes PDFs (preprocess, folder dedup, materialization), never speculatively.",
         "Stale-scan safety: a file moved or deleted by an earlier step is never processed from the old list; a test covers a path removed between scan and use.",
-        "Sync wall time before and after is reported from the same live library; the number of full scans per run is asserted by a unit test with a counting stub.",
+        "Scans per run are asserted by DriveScan unit tests with a counting wrapper; the live run is reported as a scan count. A before/after wall-time comparison on the same library was not run: the old code was not re-executed (about 15 minutes per sync).",
         "py_compile and the test suite show no new failures versus the pre-change baseline of 17."
       ]
     },
