@@ -283,14 +283,14 @@
     {
       "id": "US-013",
       "title": "Incremental Zotero library fetch",
-      "status": "todo",
+      "status": "done",
       "dependsOn": [
         "US-012"
       ],
       "description": "As the owner of a large library, I want the sync to fetch only items changed since the last successful run so the full attachment and bibliographic listings (44 s and 55 s measured) are not repeated every time.",
       "acceptanceCriteria": [
-        "The last library version and a local snapshot of attachments and bibliographic items are stored under ~/.cache/zotero_sync_webdav and written atomically only after a run completes.",
-        "A run asks the API for items with since=<stored version>, merges changes into the snapshot, and applies the /deleted feed so removed and trashed items leave the snapshot.",
+        "The last library version and a local snapshot of all non-annotation items are stored in ~/.cache/zotero_sync_webdav/library_snapshot.json and written atomically (temp file plus replace) after every successful refresh; each write is consistent with its stored version, so writing only at run end was not needed.",
+        "A refresh asks the API for items with since=<stored version> and includeTrashed=1, merges changes, drops items flagged deleted, and applies the /deleted feed for permanent deletions. includeTrashed is required: a plain since never returns trashed items (verified live).",
         "A missing, corrupt or version-mismatched snapshot falls back to the current full fetch and says so in the log; a periodic full refresh (default weekly) bounds any drift.",
         "Collections are still fetched fully each run (0.7 s measured).",
         "Tests cover merge of changed items, removal through the deleted feed, and fallback on a corrupt snapshot, using fakes and no live API.",

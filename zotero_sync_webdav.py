@@ -45,6 +45,7 @@ Limites atuais importantes:
   script faz probes e usa timeouts para distinguir lentidão de mount quebrado.
 """
 
+import copy
 import argparse
 import atexit
 import configparser
@@ -1825,27 +1826,226 @@ def preprocess_drive_copy_variants(file_paths: List[str], stats: dict) -> List[s
     return normalized_paths
 
 
-def collect_all_attachments(
+# Snapshot local da biblioteca Zotero. Listar a biblioteca inteira custa dezenas de
+# segundos por chamada; com o snapshot, uma execução sem mudanças custa uma requisição.
+LIBRARY_SNAPSHOT_FILE = os.path.join(CACHE_DIR, "library_snapshot.json")
+LIBRARY_SNAPSHOT_SCHEMA = 1
+LIBRARY_SNAPSHOT_FULL_REFRESH_DAYS = get_env_int("ZOTERO_SNAPSHOT_FULL_REFRESH_DAYS", 7)
+# Anotações de leitor são numerosas e nenhum fluxo do sync as usa.
+LIBRARY_SNAPSHOT_ITEM_FILTER = "-annotation"
+
+
+class ZoteroLibraryCache:
+    """Snapshot incremental dos itens da biblioteca, mantido por `since` e feed de apagados.
+
+    Itens na lixeira só chegam com `includeTrashed=1` (marcados `deleted`); exclusões
+    permanentes só aparecem no feed `deleted`. Os dois precisam ser aplicados, senão o
+    snapshot acumula itens que já não existem. Qualquer falha incremental cai numa
+    recarga completa; o chamador decide o que fazer se a recarga completa também falhar.
+    """
+
+    def __init__(
+        self,
+        zot: zotero.Zotero,
+        path: str | None = None,
+        full_refresh_days: int | None = None,
+        now=None,
+    ):
+        self.zot = zot
+        self.path = path or LIBRARY_SNAPSHOT_FILE
+        self.full_refresh_days = (
+            LIBRARY_SNAPSHOT_FULL_REFRESH_DAYS if full_refresh_days is None else full_refresh_days
+        )
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self.library = f"{zot.library_type}/{zot.library_id}"
+        self.version = 0
+        self.full_at: datetime | None = None
+        self.items: dict[str, dict] = {}
+        self.last_mode = "none"
+        self._loaded = False
+
+    def _load(self) -> None:
+        """Lê o snapshot do disco; qualquer inconsistência descarta tudo e força recarga completa."""
+        self._loaded = True
+        try:
+            with open(self.path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if payload.get("schema") != LIBRARY_SNAPSHOT_SCHEMA:
+                raise ValueError("versão de esquema diferente")
+            if payload.get("library") != self.library:
+                raise ValueError("snapshot de outra biblioteca")
+            items = payload["items"]
+            version = int(payload["version"])
+            full_at = datetime.fromisoformat(payload["full_at"])
+            if not isinstance(items, dict) or version <= 0:
+                raise ValueError("conteúdo inválido")
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logging.warning("[SNAPSHOT] Snapshot ignorado (%s); será feita recarga completa.", exc)
+            return
+        self.items, self.version, self.full_at = items, version, full_at
+
+    def _save(self) -> None:
+        payload = {
+            "schema": LIBRARY_SNAPSHOT_SCHEMA,
+            "library": self.library,
+            "version": self.version,
+            "full_at": self.full_at.isoformat() if self.full_at else None,
+            "items": self.items,
+        }
+        temp_path = f"{self.path}.tmp"
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            os.replace(temp_path, self.path)
+        except OSError as exc:
+            logging.warning("[SNAPSHOT] Não foi possível gravar o snapshot: %s", exc)
+
+    def _full_refresh_due(self) -> bool:
+        if not self.version or not self.full_at:
+            return True
+        return (self._now() - self.full_at).days >= self.full_refresh_days
+
+    def _fetch_full(self, version: int) -> None:
+        fetched = self.zot.everything(self.zot.items(itemType=LIBRARY_SNAPSHOT_ITEM_FILTER))
+        self.items = {item["key"]: item for item in fetched if item.get("key")}
+        self.version = version
+        self.full_at = self._now()
+        self.last_mode = "full"
+        self._save()
+        logging.info("[SNAPSHOT] Recarga completa: %d itens na versão %d.", len(self.items), version)
+
+    def _fetch_incremental(self, version: int) -> None:
+        changed = self.zot.everything(self.zot.items(
+            since=self.version,
+            includeTrashed=1,
+            itemType=LIBRARY_SNAPSHOT_ITEM_FILTER,
+        ))
+        deleted_feed = self.zot.deleted(since=self.version) or {}
+        removed = 0
+        for item in changed:
+            key = item.get("key")
+            if not key:
+                continue
+            if (item.get("data") or {}).get("deleted"):
+                removed += self.items.pop(key, None) is not None
+            else:
+                self.items[key] = item
+        for key in deleted_feed.get("items", []):
+            removed += self.items.pop(key, None) is not None
+        self.version = version
+        self.last_mode = "incremental"
+        self._save()
+        logging.info(
+            "[SNAPSHOT] Incremental: %d alterados, %d removidos, %d itens na versão %d.",
+            len(changed), removed, len(self.items), version,
+        )
+
+    def refresh(self) -> str:
+        """Atualiza o snapshot até a versão atual. Retorna 'unchanged', 'incremental' ou 'full'."""
+        if not self._loaded:
+            self._load()
+        # A versão é lida antes da busca: itens alterados durante a paginação têm versão
+        # maior e voltam no próximo `since`, então nada se perde por concorrência.
+        current = int(self.zot.last_modified_version())
+        if not self._full_refresh_due():
+            if current == self.version:
+                self.last_mode = "unchanged"
+                return self.last_mode
+            if current > self.version:
+                try:
+                    self._fetch_incremental(current)
+                    return self.last_mode
+                except Exception as exc:
+                    logging.warning("[SNAPSHOT] Falha na atualização incremental (%s); recarga completa.", exc)
+            else:
+                logging.warning(
+                    "[SNAPSHOT] Versão da biblioteca (%d) menor que a do snapshot (%d); recarga completa.",
+                    current, self.version,
+                )
+        self._fetch_full(current)
+        return self.last_mode
+
+    def attachments(self) -> List[dict]:
+        """Anexos do mais recente ao mais antigo, como cópias independentes do snapshot."""
+        found = [item for item in self.items.values() if (item.get("data") or {}).get("itemType") == "attachment"]
+        return self._sorted_copies(found)
+
+    def bibliographic_items(self) -> List[dict]:
+        """Itens top-level não-anexo com título, do mais recente ao mais antigo."""
+        found = [
+            item for item in self.items.values()
+            if not (item.get("data") or {}).get("parentItem")
+            and (item.get("data") or {}).get("itemType") != "attachment"
+            and (item.get("data") or {}).get("title")
+        ]
+        return self._sorted_copies(found)
+
+    @staticmethod
+    def _sorted_copies(items: List[dict]) -> List[dict]:
+        # Os chamadores alteram os itens que recebem; cópias impedem que isso vaze para o snapshot.
+        ordered = sorted(items, key=lambda item: item.get("key") or "")
+        ordered.sort(key=lambda item: (item.get("data") or {}).get("dateAdded") or "", reverse=True)
+        return copy.deepcopy(ordered)
+
+
+_LIBRARY_CACHE: ZoteroLibraryCache | None = None
+
+
+def get_library_cache(zot: zotero.Zotero) -> ZoteroLibraryCache:
+    """Cache único por cliente Zotero, reaproveitado entre as coletas de uma execução."""
+    global _LIBRARY_CACHE
+    if _LIBRARY_CACHE is None or _LIBRARY_CACHE.zot is not zot:
+        _LIBRARY_CACHE = ZoteroLibraryCache(zot)
+    return _LIBRARY_CACHE
+
+
+def index_attachment_items(items: List[dict], stats: dict) -> Tuple[List[dict], dict, dict]:
+    """Anota datas e indexa nomes de arquivo; o primeiro nome encontrado (mais recente) vence."""
+    existing_filenames: dict = {}
+    existing_filenames_aggressive: dict = {}
+    for item in items:
+        data = item.get('data', {})
+        date_added = parse_zotero_date(data.get('dateAdded'))
+        if date_added:
+            item['_parsed_date_added'] = date_added
+            item['_timestamp'] = date_added.timestamp()
+
+        filename = get_filename_from_item(item)
+        if filename:
+            info = {
+                'original': filename,
+                'key': item['key'],
+                'dateModified': data.get('dateModified'),
+            }
+            norm_file = normalize_filename(filename)
+            norm_agg_file = normalize_aggressive(filename)
+            if norm_file and norm_file not in existing_filenames:
+                existing_filenames[norm_file] = info
+            if norm_agg_file and norm_agg_file not in existing_filenames_aggressive:
+                existing_filenames_aggressive[norm_agg_file] = info
+
+    stats['zotero_attachments_scanned'] = len(items)
+    logging.info(
+        "[ZOT] Anexos: %d | Nomes únicos (basic): %d | (aggressive): %d",
+        len(items),
+        len(existing_filenames),
+        len(existing_filenames_aggressive),
+    )
+    # Retorna tupla consistente mesmo quando vazio.
+    return items, existing_filenames, existing_filenames_aggressive
+
+
+def collect_all_attachments_full(
     zot: zotero.Zotero,
     stats: dict,
 ) -> Tuple[List[dict], dict, dict]:
-    """
-    Busca TODOS os anexos da biblioteca sem limite de janela.
-
-    FIX: A versão anterior limitava a janela de "recentes" a MAX_ATTACHMENTS_TO_CHECK,
-    o que fazia o índice de nomes ficar incompleto — anexos antigos eram ignorados
-    na comparação, causando duplicatas ao re-adicionar o mesmo arquivo.
-
-    Agora:
-    - existing_filenames / existing_filenames_aggressive indexam TODOS os anexos.
-    - A lista retornada também é a lista completa (usada apenas para logging/debug).
-    """
+    """Lista TODOS os anexos paginando a API, sem snapshot. Falha de página encerra a lista."""
     page_size = 100
     start = 0
-    total = 0
     all_items: List[dict] = []
-    existing_filenames: dict = {}
-    existing_filenames_aggressive: dict = {}
 
     logging.info("[ZOT] Iniciando varredura completa de anexos (sem limite).")
 
@@ -1865,51 +2065,39 @@ def collect_all_attachments(
         if not items:
             break
 
-        total += len(items)
-        logging.debug("[ZOT] Página recebida. start=%d | itens=%d | total=%d", start, len(items), total)
-
-        for item in items:
-            data = item.get('data', {})
-            date_added = parse_zotero_date(data.get('dateAdded'))
-            if date_added:
-                item['_parsed_date_added'] = date_added
-                item['_timestamp'] = date_added.timestamp()
-
-            filename = get_filename_from_item(item)
-            if filename:
-                info = {
-                    'original': filename,
-                    'key': item['key'],
-                    'dateModified': data.get('dateModified'),
-                }
-                norm_file = normalize_filename(filename)
-                norm_agg_file = normalize_aggressive(filename)
-                # Guarda o primeiro encontrado (mais recente, pois ordenamos desc)
-                if norm_file and norm_file not in existing_filenames:
-                    existing_filenames[norm_file] = info
-                if norm_agg_file and norm_agg_file not in existing_filenames_aggressive:
-                    existing_filenames_aggressive[norm_agg_file] = info
-
-            all_items.append(item)
+        logging.debug("[ZOT] Página recebida. start=%d | itens=%d | total=%d", start, len(items), len(all_items) + len(items))
+        all_items.extend(items)
 
         if len(items) < page_size:
             break
         start += page_size
 
-    stats['zotero_attachments_scanned'] = total
+    return index_attachment_items(all_items, stats)
 
-    logging.info(
-        "[ZOT] Varredura concluída. Total: %d anexos | Nomes únicos (basic): %d | (aggressive): %d",
-        total,
-        len(existing_filenames),
-        len(existing_filenames_aggressive),
-    )
 
-    # FIX: retorna tupla consistente mesmo quando vazio (bug anterior retornava [] sozinho)
-    return all_items, existing_filenames, existing_filenames_aggressive
+def collect_all_attachments(
+    zot: zotero.Zotero,
+    stats: dict,
+) -> Tuple[List[dict], dict, dict]:
+    """Anexos da biblioteca inteira, a partir do snapshot incremental.
 
-def collect_all_bibliographic_items(zot: zotero.Zotero, stats: dict) -> List[dict]:
-    """Busca itens bibliográficos top-level para evitar anexos soltos duplicadores."""
+    existing_filenames / existing_filenames_aggressive indexam TODOS os anexos: uma janela
+    de "recentes" deixava anexos antigos fora da comparação e gerava duplicatas. Se o
+    snapshot falhar de qualquer forma, volta à listagem completa pela API.
+    """
+    try:
+        cache = get_library_cache(zot)
+        cache.refresh()
+        items = cache.attachments()
+    except Exception as exc:
+        logging.warning("[SNAPSHOT] Snapshot indisponível (%s); usando listagem completa de anexos.", exc)
+        return collect_all_attachments_full(zot, stats)
+    stats['library_fetch_mode'] = cache.last_mode
+    return index_attachment_items(items, stats)
+
+
+def collect_all_bibliographic_items_full(zot: zotero.Zotero, stats: dict) -> List[dict]:
+    """Lista itens bibliográficos top-level paginando a API, sem snapshot."""
     page_size = 100
     start = 0
     all_items: list[dict] = []
@@ -1943,8 +2131,22 @@ def collect_all_bibliographic_items(zot: zotero.Zotero, stats: dict) -> List[dic
             break
         start += page_size
 
+    return all_items
+
+
+def collect_all_bibliographic_items(zot: zotero.Zotero, stats: dict) -> List[dict]:
+    """Itens bibliográficos top-level, a partir do snapshot incremental, para evitar anexos soltos duplicadores."""
+    try:
+        cache = get_library_cache(zot)
+        cache.refresh()
+        all_items = cache.bibliographic_items()
+        stats['library_fetch_mode'] = cache.last_mode
+    except Exception as exc:
+        logging.warning("[SNAPSHOT] Snapshot indisponível (%s); usando listagem completa de itens.", exc)
+        all_items = collect_all_bibliographic_items_full(zot, stats)
+
     stats['zotero_bibliographic_scanned'] = len(all_items)
-    logging.info("[BIB] Varredura concluída. Itens bibliográficos: %d.", len(all_items))
+    logging.info("[BIB] Itens bibliográficos: %d.", len(all_items))
     return all_items
 
 
