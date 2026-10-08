@@ -73,3 +73,17 @@ Story order:
 Dependencies:
 - Milestone 5 complete.
 - The collection-flip guard (`find_ambiguous_drive_names`) is already in place.
+
+## Milestone 7: Sync run cost
+Status: proposed, awaiting approval to start US-012.
+
+Goal:
+Cut the fixed cost of each sync run using measurements from the live library (1850 PDFs, rclone mount). Measured on 2026-10-07: connect 6.9 s, full attachment listing 44.4 s, full bibliographic listing 55.5 s, collections 0.7 s, one recursive drive scan 41.5 s, hashing of size-colliding candidates under 0.1 s with a warm cache. Hashing is not the bottleneck; the API listings and the repeated drive scans are.
+
+Story order:
+1. US-012: Scan the drive once per sync run (includes removing the extra scan added with the collection-flip guard).
+2. US-013: Incremental Zotero library fetch.
+3. US-014: Content-hash view shared by report and sync (conditional on measured need).
+
+Dependencies:
+- Milestone 6 complete.

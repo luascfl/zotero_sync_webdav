@@ -263,6 +263,52 @@
         "Bibliographic duplicates matched only by title are reported, never auto-deleted; DOI matches keep the current merge behavior.",
         "Zotero items removed by the duplicate cleanup are sent to the Zotero trash and recorded in duplicate_actions.jsonl."
       ]
+    },
+    {
+      "id": "US-012",
+      "title": "Scan the drive once per sync run",
+      "status": "todo",
+      "dependsOn": [
+        "US-011"
+      ],
+      "description": "As the owner of a rclone-mounted library, I want one recursive PDF scan per sync so each run stops paying for the same slow directory walk several times.",
+      "acceptanceCriteria": [
+        "Measured baseline recorded first: one collect_all_pdfs over 1850 PDFs took 41.5 s on the mount, and run_sync_mode currently calls it at the pre-copy preprocess, in the ambiguity check added by US-009 follow-up, and for files_to_process, besides the index builders.",
+        "A single scan result is produced early in run_sync_mode and reused by the ambiguity check, the index builders and the main loop; it is refreshed only after a step that moves or removes PDFs (preprocess, folder dedup, materialization), never speculatively.",
+        "Stale-scan safety: a file moved or deleted by an earlier step is never processed from the old list; a test covers a path removed between scan and use.",
+        "Sync wall time before and after is reported from the same live library; the number of full scans per run is asserted by a unit test with a counting stub.",
+        "py_compile and the test suite show no new failures versus the pre-change baseline of 17."
+      ]
+    },
+    {
+      "id": "US-013",
+      "title": "Incremental Zotero library fetch",
+      "status": "todo",
+      "dependsOn": [
+        "US-012"
+      ],
+      "description": "As the owner of a large library, I want the sync to fetch only items changed since the last successful run so the full attachment and bibliographic listings (44 s and 55 s measured) are not repeated every time.",
+      "acceptanceCriteria": [
+        "The last library version and a local snapshot of attachments and bibliographic items are stored under ~/.cache/zotero_sync_webdav and written atomically only after a run completes.",
+        "A run asks the API for items with since=<stored version>, merges changes into the snapshot, and applies the /deleted feed so removed and trashed items leave the snapshot.",
+        "A missing, corrupt or version-mismatched snapshot falls back to the current full fetch and says so in the log; a periodic full refresh (default weekly) bounds any drift.",
+        "Collections are still fetched fully each run (0.7 s measured).",
+        "Tests cover merge of changed items, removal through the deleted feed, and fallback on a corrupt snapshot, using fakes and no live API.",
+        "Live validation reports the item counts of an incremental run against a full fetch and they match."
+      ]
+    },
+    {
+      "id": "US-014",
+      "title": "Content-hash view shared by report and sync",
+      "status": "todo",
+      "dependsOn": [
+        "US-012"
+      ],
+      "description": "As a maintainer, I want one hash-to-copies index per run so duplicate decisions stop depending on filename similarity.",
+      "acceptanceCriteria": [
+        "Hashing cost is measured first: the live report hashed only 4 size-colliding candidates in under 0.1 s with a warm cache, so this story proceeds only if the sync paths that still compare by name show a real defect or cost.",
+        "If it proceeds, build_duplicates_report and the sync copy-variant and folder-dedup paths read the same index, and the story removes the duplicated comparison code it replaces."
+      ]
     }
   ]
 }
