@@ -228,6 +228,11 @@ WEB_CACHE_TAG = "zotero-sync:web-cache"
 WEB_CACHE_SOURCE_EXTRA_PREFIX = "Zotero Sync Web Cache source attachment: "
 
 HASH_CACHE: Dict[str, dict] = {}
+# Processo que o sync iniciou apenas quando o Zotero Desktop estava fechado.
+# Precisa existir também quando o Desktop já estava aberto: a importação decide
+# se pede reconhecimento automático com base neste sentinela.
+_HEADLESS_ZOTERO_PROC: subprocess.Popen | None = None
+
 
 # FIX: Limites aumentados para cobrir bibliotecas grandes.
 # 0 = sem limite (processa tudo).
