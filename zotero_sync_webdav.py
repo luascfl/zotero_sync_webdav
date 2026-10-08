@@ -1619,7 +1619,7 @@ def merge_duplicate_metadata_into_keeper(
         data['relations'] = merged_relations
         if keeper_item.get('data') is not None:
             keeper_item['data'] = data
-        zot.update_item(data)
+        zot.update_item(sanitize_zotero_update_payload(data))
     return True
 
 
@@ -3515,7 +3515,7 @@ def update_zotero_attachment_filename(
             item_data['title'] = new_filename
             if item_data.get('path', '').startswith('storage:'):
                 item_data['path'] = f"storage:{new_filename}"
-        zot.update_item(item_data)
+        zot.update_item(sanitize_zotero_update_payload(item_data))
         latest = zot.item(key)
         latest_name = os.path.basename(get_filename_from_item(latest))
         latest_title = latest.get('data', {}).get('title')
@@ -5606,7 +5606,7 @@ def update_item_collection_membership(
         if collection_key in collections:
             return False
         item_data["collections"] = sorted(set(collections + [collection_key]))
-        zot.update_item(item_data)
+        zot.update_item(sanitize_zotero_update_payload(item_data))
         if item is not None:
             item.setdefault("data", {})["collections"] = item_data["collections"]
         logging.info("[COLLECTION] Item %s adicionado à coleção %s.", item_key, collection_key)
