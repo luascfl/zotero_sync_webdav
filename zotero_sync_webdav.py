@@ -5107,9 +5107,6 @@ def reconcile_drive_collection_paths(
             stats['drive_authoritative_collection_updates'] += 1
 
 
-DEFAULT_OBSIDIAN_SNAP_APP_DIR = Path.home() / "snap/obsidian/current/.config/obsidian"
-DEFAULT_OBSIDIAN_DEB_APP_DIR = Path.home() / ".config/obsidian"
-DEFAULT_OBSIDIAN_TARGET_ROOT = Path.home() / "Documentos/ObsidianLocal"
 INVALID_OBSIDIAN_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
 
 
@@ -5475,27 +5472,21 @@ def infer_collection_key_from_relative_path(
     return None
 
 
-def ensure_collection_directories(
+def ensure_unified_vault_collection_directories(
     collection_by_key: dict[str, dict],
-    drive_root: str,
-    obsidian_root: Path,
+    vault_root: str | Path,
     stats: dict,
 ) -> None:
-    """Garante a existência das pastas espelhadas de coleção no drive e no Obsidian."""
-    stats.setdefault("created_drive_collection_dirs", 0)
-    stats.setdefault("created_obsidian_collection_dirs", 0)
+    """Garante as pastas de coleção dentro da única raiz física do vault."""
+    stats.setdefault("created_unified_vault_collection_dirs", 0)
     for payload in collection_by_key.values():
         relative_path = payload.get("relative_path")
         if not relative_path:
             continue
-        drive_dir = os.path.join(drive_root, *relative_path.split("/"))
-        if not os.path.isdir(drive_dir):
-            os.makedirs(drive_dir, exist_ok=True)
-            stats["created_drive_collection_dirs"] += 1
-        obsidian_dir = obsidian_root / Path(relative_path)
-        if not obsidian_dir.exists():
-            obsidian_dir.mkdir(parents=True, exist_ok=True)
-            stats["created_obsidian_collection_dirs"] += 1
+        vault_dir = Path(vault_root) / Path(relative_path)
+        if not vault_dir.is_dir():
+            vault_dir.mkdir(parents=True, exist_ok=True)
+            stats["created_unified_vault_collection_dirs"] += 1
 
 
 
@@ -5679,123 +5670,6 @@ def build_expected_attachment_path_indexes(
     return path_index, path_aggressive_index
 
 
-def collect_obsidian_ingest_candidates(
-    obsidian_root: Path,
-    collection_path_to_key: dict[str, str],
-) -> List[dict]:
-    """Lista PDFs do Obsidian que vivem sob uma pasta mapeada de coleção."""
-    candidates: list[dict] = []
-    if not obsidian_root.exists():
-        return candidates
-    for root, dirnames, filenames in os.walk(obsidian_root):
-        dirnames[:] = [name for name in dirnames if name not in {'.obsidian', '.git', '__pycache__'}]
-        for name in filenames:
-            if not name.lower().endswith('.pdf'):
-                continue
-            source_path = os.path.join(root, name)
-            relative_path = relpath_from_root(obsidian_root, source_path)
-            collection_key = infer_collection_key_from_relative_path(relative_path, collection_path_to_key)
-            if not collection_key:
-                continue
-            try:
-                mtime = os.path.getmtime(source_path)
-            except OSError:
-                mtime = 0.0
-            candidates.append({
-                "path": source_path,
-                "filename": name,
-                "relative_path": relative_path,
-                "collection_key": collection_key,
-                "mtime": mtime,
-            })
-    candidates.sort(key=lambda entry: entry["mtime"], reverse=True)
-    return candidates
-
-
-def ingest_obsidian_pdfs_to_drive(
-    obsidian_root: Path,
-    drive_root: str,
-    collection_by_key: dict[str, dict],
-    collection_path_to_key: dict[str, str],
-    stats: dict,
-) -> None:
-    """Move PDFs novos do Obsidian para a pasta correspondente no drive do Zotero."""
-    stats.setdefault("obsidian_new_pdfs_detected", 0)
-    stats.setdefault("obsidian_pdfs_moved_to_drive", 0)
-    stats.setdefault("obsidian_pdfs_blocked", 0)
-    stats.setdefault("obsidian_pdfs_deduped", 0)
-
-    candidates = collect_obsidian_ingest_candidates(obsidian_root, collection_path_to_key)
-    stats["obsidian_new_pdfs_detected"] += len(candidates)
-    for entry in candidates:
-        collection_key = entry["collection_key"]
-        collection_info = collection_by_key.get(collection_key)
-        if not collection_info:
-            stats["obsidian_pdfs_blocked"] += 1
-            logging.warning("[OBSIDIAN->DRIVE] Coleção %s não encontrada para '%s'.", collection_key, entry["path"])
-            continue
-
-        dest_dir = os.path.join(drive_root, *collection_info["relative_parts"])
-        dest_path = os.path.join(dest_dir, entry["filename"])
-        os.makedirs(dest_dir, exist_ok=True)
-
-        source_hash = compute_sha256(entry["path"])
-        if not source_hash:
-            stats["obsidian_pdfs_blocked"] += 1
-            logging.warning("[OBSIDIAN->DRIVE] Não foi possível hashear '%s'.", entry["path"])
-            continue
-
-        if os.path.exists(dest_path):
-            dest_hash = compute_sha256(dest_path)
-            if dest_hash and dest_hash == source_hash:
-                try:
-                    if not quarantine_file(
-                        entry["path"],
-                        action="obsidian_redundant_copy",
-                        reason="same_hash_in_drive",
-                        kept_path=dest_path,
-                        file_hash=source_hash,
-                    ):
-                        raise OSError("quarentena falhou; original mantido")
-                    remove_cache_entry(HASH_CACHE, entry["path"])
-                    stats["obsidian_pdfs_deduped"] += 1
-                    logging.info(
-                        "[OBSIDIAN->DRIVE] PDF redundante removido do Obsidian após confirmar cópia no drive: '%s'.",
-                        entry["path"],
-                    )
-                except OSError as exc:
-                    stats["obsidian_pdfs_blocked"] += 1
-                    logging.warning("[OBSIDIAN->DRIVE] Falha ao remover redundante '%s': %s", entry["path"], exc)
-                continue
-
-            stats["obsidian_pdfs_blocked"] += 1
-            logging.warning(
-                "[OBSIDIAN->DRIVE] Colisão com conteúdo diferente ao mover '%s' para '%s'.",
-                entry["path"],
-                dest_path,
-            )
-            continue
-
-        try:
-            shutil.move(entry["path"], dest_path)
-            rename_cache_entry(HASH_CACHE, entry["path"], dest_path)
-            set_cached_hash(dest_path, source_hash, HASH_CACHE)
-            stats["obsidian_pdfs_moved_to_drive"] += 1
-            logging.info(
-                "[OBSIDIAN->DRIVE] PDF movido para o drive da coleção %s: '%s' -> '%s'.",
-                collection_key,
-                entry["path"],
-                dest_path,
-            )
-        except OSError as exc:
-            stats["obsidian_pdfs_blocked"] += 1
-            logging.warning(
-                "[OBSIDIAN->DRIVE] Falha ao mover '%s' para '%s': %s",
-                entry["path"],
-                dest_path,
-                exc,
-            )
-
 
 def update_item_collection_membership(
     zot: zotero.Zotero,
@@ -5824,13 +5698,9 @@ def update_item_collection_membership(
 
 
 
-def resolve_obsidian_mirror_target_root(target_root: str | None) -> Path:
-    target_root_raw = (
-        target_root
-        or os.environ.get("OBSIDIAN_ZOTERO_MIRROR_ROOT", "").strip()
-        or str(DEFAULT_OBSIDIAN_TARGET_ROOT)
-    )
-    return Path(os.path.expanduser(target_root_raw)).resolve()
+def resolve_unified_vault_root() -> Path:
+    """Retorna a raiz física única compartilhada pelo Drive e pelo Obsidian."""
+    return Path(TARGET_FOLDER).expanduser().resolve()
 
 
 def mirror_zotero_collections_to_obsidian(
@@ -6033,8 +5903,8 @@ def run_obsidian_apply_mode(args: argparse.Namespace) -> None:
 
 def run_obsidian_mirror_mode(args: argparse.Namespace) -> None:
     apply_changes = args.apply and not args.dry_run
-    target_root = resolve_obsidian_mirror_target_root(args.target_root)
-    obsidian_log("Conectando ao Zotero para espelhar coleções...")
+    target_root = resolve_unified_vault_root()
+    obsidian_log("Conectando ao Zotero para espelhar coleções no vault unificado...")
     zot = connect_zotero_client()
     mirror_zotero_collections_to_obsidian(zot, target_root, apply_changes)
 
@@ -6050,7 +5920,6 @@ def run_obsidian_setup_mode(args: argparse.Namespace) -> None:
         dry_run=dry_run,
     )
     mirror_args = argparse.Namespace(
-        target_root=args.target_root,
         dry_run=dry_run,
         apply=args.apply,
     )
@@ -6310,10 +6179,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
         'obsidian-mirror',
         help='Espelha coleções do Zotero como pastas no Obsidian',
     )
-    obsidian_mirror_parser.add_argument(
-        '--target-root',
-        help='Diretório raiz de destino no Obsidian. Padrão: OBSIDIAN_ZOTERO_MIRROR_ROOT ou ~/Documentos/ObsidianLocal',
-    )
     obsidian_mirror_parser.add_argument('--dry-run', action='store_true', help='Só mostra o que faria, sem criar pastas')
     obsidian_mirror_parser.add_argument('--apply', action='store_true', help='Aplica de fato a criação das pastas')
 
@@ -6326,10 +6191,6 @@ def build_cli_parser() -> argparse.ArgumentParser:
     obsidian_setup_parser.add_argument('--bundle', required=True, help='Diretório do bundle exportado')
     obsidian_setup_parser.add_argument('--map', action='append', help='Mapeia prefixo de path: antigo=novo')
     obsidian_setup_parser.add_argument('--create-missing-vaults', action='store_true', help='Cria vaults ausentes no destino')
-    obsidian_setup_parser.add_argument(
-        '--target-root',
-        help='Diretório raiz de destino no Obsidian para o espelho das coleções',
-    )
     obsidian_setup_parser.add_argument('--dry-run', action='store_true', help='Simula sem escrever')
     obsidian_setup_parser.add_argument('--apply', action='store_true', help='Aplica de fato configuração e espelho')
 
@@ -6647,14 +6508,9 @@ def run_sync_mode(notification_policy: dict | None = None):
         'desktop_recognition_processed': 0,
         'desktop_recognition_skipped': 0,
         'desktop_parent_fallbacks': 0,
-        'created_drive_collection_dirs': 0,
-        'created_obsidian_collection_dirs': 0,
+        'created_unified_vault_collection_dirs': 0,
         'created_zotero_collections_from_drive': 0,
         'drive_authoritative_collection_updates': 0,
-        'obsidian_new_pdfs_detected': 0,
-        'obsidian_pdfs_moved_to_drive': 0,
-        'obsidian_pdfs_blocked': 0,
-        'obsidian_pdfs_deduped': 0,
         'preprocessed_drive_copy_variants': 0,
         'blocked_drive_copy_variants': 0,
         'moved_drive_files_to_collection': 0,
@@ -6786,22 +6642,7 @@ def run_sync_mode(notification_policy: dict | None = None):
     ):
         collections = fetch_zotero_collections(zot)
         collection_by_key, collection_children, collection_path_to_key = build_collection_path_model(collections)
-    obsidian_root = resolve_obsidian_mirror_target_root(None)
-    ensure_collection_directories(collection_by_key, TARGET_FOLDER, obsidian_root, stats)
-
-    ingest_obsidian_pdfs_to_drive(
-        obsidian_root,
-        TARGET_FOLDER,
-        collection_by_key,
-        collection_path_to_key,
-        stats,
-    )
-    # Ingestão move ou remove PDFs no drive: a varredura reaproveitada deixa de valer.
-    if (
-        stats.get("obsidian_pdfs_moved_to_drive", 0)
-        or stats.get("obsidian_pdfs_deduped", 0)
-    ):
-        drive_scan.invalidate()
+    ensure_unified_vault_collection_directories(collection_by_key, TARGET_FOLDER, stats)
 
     expected_path_index, expected_path_aggressive_index = build_expected_attachment_path_indexes(
         all_attachments,
@@ -7489,13 +7330,8 @@ def run_sync_mode(notification_policy: dict | None = None):
 │ Cópias pré-sync bloqueadas: {stats['blocked_drive_copy_variants']:<16} │
 │ Reconhecimento desktop: {stats['desktop_recognition_processed']}/{stats['desktop_recognition_requested']:<23} │
 │ Itens pai fallback: {stats['desktop_parent_fallbacks']:<24} │
-│ Pastas coleção drive: {stats['created_drive_collection_dirs']:<22} │
-│ Pastas coleção Obsidian: {stats['created_obsidian_collection_dirs']:<19} │
+│ Pastas de coleção no vault unificado: {stats['created_unified_vault_collection_dirs']:<10} │
 │ Coleções criadas do drive: {stats['created_zotero_collections_from_drive']:<14} │
-│ PDFs novos no Obsidian: {stats['obsidian_new_pdfs_detected']:<21} │
-│ PDFs movidos ao drive: {stats['obsidian_pdfs_moved_to_drive']:<22} │
-│ PDFs bloqueados Obsidian: {stats['obsidian_pdfs_blocked']:<18} │
-│ PDFs deduplicados Obsidian: {stats['obsidian_pdfs_deduped']:<15} │
 │ Arquivos realocados à coleção: {stats['moved_drive_files_to_collection']:<14} │
 │ Coleções alinhadas ao drive: {stats['drive_authoritative_collection_updates']:<13} │
 │ 🧹 Duplicados removidos: {stats['pruned_drive_duplicates']:<22} │

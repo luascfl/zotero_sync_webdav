@@ -87,3 +87,17 @@ Story order:
 
 Dependencies:
 - Milestone 6 complete.
+
+## Milestone 8: Unified Obsidian vault
+Status: in progress.
+
+Goal:
+Make the configured Drive target the single physical root for Zotero PDFs and the Obsidian vault, with collection paths shared in place and no sync-time copy or move between separate roots.
+
+Story order:
+1. US-015: Make the Obsidian vault share the Drive root.
+2. Follow-up: preserve collection-origin classification while ingesting PDFs already in place.
+
+Dependencies:
+- Milestone 7's shared recursive scan is complete.
+- The existing collection-path model remains the sole source of physical collection paths.

@@ -12,69 +12,27 @@ Updated: 2026-07-09
 
 - Active sync target is now the direct rclone Google Drive mount at `/home/lucas/Google Drive/zoterodb`; GVFS/WebDAV remains manual-only.
 ## Active milestone
-Milestone 0: governance bootstrap.
+Milestone 8: Unified Obsidian vault.
 
-### Milestone 0 dependencies
-- User clarification: complete.
-- AI Coders Context scaffold: complete for `.context/docs/`.
-- PRD JSON: created and JSON-validated at `.context/prd_ralph/prd.json`.
-- GSD project plan: created at `.context/docs/planning_gsd/PROJECT.md`.
-- Workflow status: initialized at `.context/workflow/status.yaml` with current phase P.
-- Syntax validation: `python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py` passed on 2026-04-30.
+### Completed story
+- US-015: Make the Obsidian vault share the Drive root.
+- The Obsidian collection tree now defaults to `ZOTERO_SYNC_TARGET_FOLDER`, the sole physical vault root.
+- Removed the active second-root ingest, move, deduplication, and reporting paths. PDFs remain in place for both Obsidian and Zotero reconciliation.
 
 ## Next milestone
-Milestone 4: Post-release Hardening & Quality of Life.
+Continue Milestone 8 with collection-origin classification for PDFs already in the unified Drive tree.
 
 Dependencies:
-- Milestone 3 complete.
-- Recent manual additions (Folder Deduplication, Lock) require test coverage to prevent future regressions.
+- US-015 complete.
+- Existing path-aware Drive scan and collection-path model remain available.
 
 ## Next Ralph story
-- ID: None
-- Title: None
-- Reason: all planned stories are complete.
-
-## Definition of done for next story
-- N/A
-
-## Validation checklist for next story
-- N/A
+- Title: Classify in-place PDFs by unified collection path.
+- Definition of done: a PDF already in a mapped collection folder receives or retains the matching Zotero collection without a copy or move.
+- Validation: temporary-directory path inference and collection-association tests; syntax gate; focused tests.
 
 ## Evidence log update
-- 2026-07-20: completed US-007 (test coverage for folder deduplication and single-instance locks). Added `tests/test_folder_deduplication.py` and `tests/test_single_instance.py`. Both pass successfully using temporary directories and `unittest.mock`. 
-
-## Gemini prompt for next story
-```text
-You are Gemini executing one Ralph story in /home/lucas/Downloads/zotero_sync_webdav.
-
-Read first:
-1. AGENTS.md
-2. GEMINI.md
-3. .context/docs/README.md
-4. .context/docs/planning_gsd/STATE.md
-5. .context/prd_ralph/prd.json
-
-Execute only story US-001: Make main sync import-safe and testable.
-
-Scope:
-- Touch zotero_sync_webdav.py and add tests/ files only if needed.
-- Do not touch the helper scripts unless a syntax gate reveals an issue caused by this story.
-- Do not contact Zotero API in tests.
-- Preserve automated operation of the main sync path.
-
-Required behavior:
-- Importing zotero_sync_webdav with no ZOTERO_* environment variables must not raise.
-- Runtime config validation must still fail clearly before any Zotero API call when required values are missing.
-- Move import-time side effects that block tests into explicit runtime setup used by main().
-- Add unittest coverage for import-safety, resolve_target_folder, normalize_filename, normalize_aggressive, and _coerce_response_items malformed/empty cases.
-
-Verification:
-- Run: python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py
-- Run: python3 -m unittest discover -s tests
-- Update .context/docs/planning_gsd/STATE.md with exact validation evidence.
-
-Return a concise result with files changed and command results.
-```
+- 2026-10-10: completed US-015. `resolve_unified_vault_root()` resolves the configured Drive target; `ensure_unified_vault_collection_directories()` creates the collection tree once in that root; the two-root Obsidian-to-Drive move path and its obsolete counters/CLI root overrides were removed. Validation passed: `python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py`; `python3 -m unittest tests.test_unified_vault` (2 tests); `python3 zotero_sync_webdav.py --help`; `graphify update .`. Full discovery ran 196 tests and retained the documented 17 unrelated failures/errors in collection-cleanup, diagnostic, setup-launcher, and watcher tests; the two new unified-vault tests passed.
 
 ## Evidence log
 - 2026-04-30: AI Coders Context mapped 4 Python scripts and symbol lists.

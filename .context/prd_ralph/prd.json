@@ -309,6 +309,23 @@
         "Hashing cost is measured first: the live report hashed only 4 size-colliding candidates in under 0.1 s with a warm cache, so this story proceeds only if the sync paths that still compare by name show a real defect or cost.",
         "If it proceeds, build_duplicates_report and the sync copy-variant and folder-dedup paths read the same index, and the story removes the duplicated comparison code it replaces."
       ]
+    },
+    {
+      "id": "US-015",
+      "title": "Make the Obsidian vault share the Drive root",
+      "status": "done",
+      "dependsOn": [
+        "US-012"
+      ],
+      "description": "As the owner of the unified vault, I want the Obsidian collection tree to live in the same physical Drive root as the Zotero PDFs so normal sync never moves or deletes a second Obsidian copy.",
+      "acceptanceCriteria": [
+        "The default Obsidian collection root resolves to the configured Zotero Drive target.",
+        "The main sync creates each collection directory once in the unified root and does not call any Obsidian-to-Drive move or duplicate-cleanup path.",
+        "The obsolete two-root ingest helper is removed rather than left as an alternate active path.",
+        "The final report describes unified-vault directories without counters for a second Obsidian copy or moved Obsidian PDFs.",
+        "Unit tests cover default root selection and directory creation without an API call or mounted Drive.",
+        "python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py and the focused unified-vault tests pass."
+      ]
     }
   ]
 }
