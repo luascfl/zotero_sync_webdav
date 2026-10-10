@@ -326,6 +326,22 @@
         "Unit tests cover default root selection and directory creation without an API call or mounted Drive.",
         "python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py and the focused unified-vault tests pass."
       ]
+    },
+    {
+      "id": "US-016",
+      "title": "Classify in-place PDFs by unified collection path",
+      "status": "done",
+      "dependsOn": [
+        "US-015"
+      ],
+      "description": "As the owner of the unified vault, I want a PDF already under a mapped collection path to align its Zotero item to that collection without moving, copying, or renaming the file.",
+      "acceptanceCriteria": [
+        "A same-content PDF in one mapped collection folder updates the parent bibliographic item to that collection using a fresh Zotero item version.",
+        "The source PDF stays at its original path and no filesystem mutation is performed by the classification step.",
+        "Duplicate filenames in multiple collection paths remain blocked from automatic collection changes.",
+        "Focused temporary-directory tests cover both the positive in-place classification and the existing ambiguity block.",
+        "python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py and the focused tests pass."
+      ]
     }
   ]
 }

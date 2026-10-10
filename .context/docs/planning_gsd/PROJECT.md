@@ -96,7 +96,8 @@ Make the configured Drive target the single physical root for Zotero PDFs and th
 
 Story order:
 1. US-015: Make the Obsidian vault share the Drive root.
-2. Follow-up: preserve collection-origin classification while ingesting PDFs already in place.
+2. US-016: Classify in-place PDFs by unified collection path.
+3. Follow-up: register the configured Drive root as the Obsidian vault during setup.
 
 Dependencies:
 - Milestone 7's shared recursive scan is complete.

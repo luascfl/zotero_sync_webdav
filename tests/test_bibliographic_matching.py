@@ -802,6 +802,70 @@ class BibliographicMatchingTests(unittest.TestCase):
         ambiguous = zsync.find_ambiguous_drive_names(paths, root)
         self.assertEqual(ambiguous, {zsync.normalize_aggressive("Cartilha avaliacao.pdf")})
 
+    def test_reconcile_classifies_in_place_pdf_by_its_collection_path(self):
+        class FakeZotero:
+            def __init__(self):
+                self.updated = []
+
+            def item(self, key):
+                if key != "PARENT":
+                    raise AssertionError(f"unexpected item lookup: {key}")
+                return {
+                    "data": {
+                        "key": key,
+                        "version": 42,
+                        "collections": ["COLA"],
+                    }
+                }
+
+            def update_item(self, item):
+                self.updated.append(item)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            drive = Path(temp_dir) / "drive"
+            pdf = drive / "B" / "Doc - Silva 2024.pdf"
+            pdf.parent.mkdir(parents=True)
+            pdf.write_bytes(b"same")
+            local = Path(temp_dir) / "local.pdf"
+            local.write_bytes(b"same")
+            parent = make_item(
+                "PARENT",
+                "Doc",
+                date="2024",
+                creators=[{"creatorType": "author", "lastName": "Silva"}],
+            )
+            parent["data"]["collections"] = ["COLA"]
+            attachment = {"key": "ATT1", "data": {
+                "key": "ATT1",
+                "itemType": "attachment",
+                "parentItem": "PARENT",
+                "filename": "Doc - Silva 2024.pdf",
+                "contentType": "application/pdf",
+            }}
+            collections = {
+                "COLA": {"relative_path": "A", "name": "A"},
+                "COLB": {"relative_path": "B", "name": "B"},
+            }
+            name = zsync.normalize_filename("Doc - Silva 2024.pdf")
+            aggressive = zsync.normalize_aggressive("Doc - Silva 2024.pdf")
+            stats = {}
+            original_target = zsync.TARGET_FOLDER
+            zsync.TARGET_FOLDER = str(drive)
+            try:
+                zsync.reconcile_drive_collection_paths(
+                    FakeZotero(), [attachment], {"PARENT": parent}, collections,
+                    {"a": "COLA", "b": "COLB"},
+                    {name: str(pdf)}, {aggressive: str(pdf)},
+                    {"ATT1": str(local)}, stats, set(),
+                )
+            finally:
+                zsync.TARGET_FOLDER = original_target
+
+            self.assertTrue(pdf.exists())
+            self.assertEqual(pdf.read_bytes(), b"same")
+            self.assertEqual(stats["drive_authoritative_collection_updates"], 1)
+            self.assertEqual(parent["data"]["collections"], ["COLB"])
+
     def test_reconcile_does_not_flip_collection_for_ambiguous_name(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             drive = Path(temp_dir) / "drive"

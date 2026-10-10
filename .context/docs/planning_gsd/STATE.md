@@ -14,24 +14,26 @@ Updated: 2026-07-09
 ## Active milestone
 Milestone 8: Unified Obsidian vault.
 
-### Completed story
+### Completed stories
 - US-015: Make the Obsidian vault share the Drive root.
-- The Obsidian collection tree now defaults to `ZOTERO_SYNC_TARGET_FOLDER`, the sole physical vault root.
-- Removed the active second-root ingest, move, deduplication, and reporting paths. PDFs remain in place for both Obsidian and Zotero reconciliation.
+- US-016: Classify in-place PDFs by unified collection path.
+- The Drive path is authoritative only after the attachment and drive file have the same SHA-256. A unique mapped folder updates the fresh Zotero parent item version; duplicate filenames across collection paths remain blocked.
 
 ## Next milestone
-Continue Milestone 8 with collection-origin classification for PDFs already in the unified Drive tree.
+Continue Milestone 8 by registering the configured Drive root as the Obsidian vault during setup.
 
 Dependencies:
-- US-015 complete.
-- Existing path-aware Drive scan and collection-path model remain available.
+- US-015 and US-016 complete.
+- Decide which existing Obsidian vault entry, if any, setup may replace or preserve.
 
 ## Next Ralph story
-- Title: Classify in-place PDFs by unified collection path.
-- Definition of done: a PDF already in a mapped collection folder receives or retains the matching Zotero collection without a copy or move.
-- Validation: temporary-directory path inference and collection-association tests; syntax gate; focused tests.
+- Title: Register the unified Drive root in Obsidian setup.
+- Definition of done: `obsidian-setup` preserves unrelated vault entries and registers the configured Drive root without copying PDFs.
+- Validation: temporary app-config tests and dry-run output; syntax gate; focused tests.
 
 ## Evidence log update
+- 2026-10-10: completed US-016. Existing `reconcile_drive_collection_paths()` was verified with a regression test for one same-content PDF already under a mapped collection folder. It updates the parent item to the folder's collection through a fresh Zotero item version, leaves the PDF bytes and path untouched, and retains the pre-existing ambiguity guard for duplicate filenames in multiple mapped paths. Validation passed: `python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py`; `python3 -m unittest tests.test_bibliographic_matching tests.test_unified_vault` (53 tests).
+
 - 2026-10-10: completed US-015. `resolve_unified_vault_root()` resolves the configured Drive target; `ensure_unified_vault_collection_directories()` creates the collection tree once in that root; the two-root Obsidian-to-Drive move path and its obsolete counters/CLI root overrides were removed. Validation passed: `python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py`; `python3 -m unittest tests.test_unified_vault` (2 tests); `python3 zotero_sync_webdav.py --help`; `graphify update .`. Full discovery ran 196 tests and retained the documented 17 unrelated failures/errors in collection-cleanup, diagnostic, setup-launcher, and watcher tests; the two new unified-vault tests passed.
 
 ## Evidence log
