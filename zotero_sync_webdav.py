@@ -5107,6 +5107,9 @@ def reconcile_drive_collection_paths(
             stats['drive_authoritative_collection_updates'] += 1
 
 
+DEFAULT_OBSIDIAN_SNAP_APP_DIR = Path.home() / "snap/obsidian/current/.config/obsidian"
+DEFAULT_OBSIDIAN_DEB_APP_DIR = Path.home() / ".config/obsidian"
+
 INVALID_OBSIDIAN_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
 
 

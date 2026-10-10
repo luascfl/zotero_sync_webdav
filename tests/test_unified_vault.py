@@ -32,6 +32,11 @@ class UnifiedVaultTopologyTests(unittest.TestCase):
             finally:
                 zsync.TARGET_FOLDER = original_target
 
+    def test_deb_obsidian_resolver_keeps_its_app_path_default(self):
+        kind, app_dir = zsync.resolve_obsidian_app_dir("deb", None)
+        self.assertEqual(kind, "deb")
+        self.assertEqual(app_dir, zsync.DEFAULT_OBSIDIAN_DEB_APP_DIR)
+
     def test_collection_directories_are_created_once_in_unified_root(self):
         collections = [
             {"key": "ROOT", "data": {"name": "Curso"}},
