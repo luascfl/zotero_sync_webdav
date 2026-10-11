@@ -37,6 +37,21 @@ class UnifiedVaultTopologyTests(unittest.TestCase):
         self.assertEqual(kind, "deb")
         self.assertEqual(app_dir, zsync.DEFAULT_OBSIDIAN_DEB_APP_DIR)
 
+    def test_registry_preserves_existing_vaults_when_adding_unified_root(self):
+        existing = {"IMAGES": {"path": "/srv/images", "ts": 1}}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            vault_root = Path(temp_dir) / "zoterodb"
+            merged, added = zsync.ensure_unified_vault_registry_entry(existing, vault_root)
+
+            self.assertTrue(added)
+            self.assertEqual(existing, {"IMAGES": {"path": "/srv/images", "ts": 1}})
+            self.assertEqual(merged["IMAGES"], existing["IMAGES"])
+            self.assertIn(str(vault_root.resolve()), [entry["path"] for entry in merged.values()])
+
+            unchanged, added_again = zsync.ensure_unified_vault_registry_entry(merged, vault_root)
+            self.assertFalse(added_again)
+            self.assertEqual(unchanged, merged)
+
     def test_collection_directories_are_created_once_in_unified_root(self):
         collections = [
             {"key": "ROOT", "data": {"name": "Curso"}},

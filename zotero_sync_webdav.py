@@ -5828,6 +5828,24 @@ def resolve_target_vault_path(
         mapped = windows_style_path(mapped)
     return mapped
 
+def ensure_unified_vault_registry_entry(
+    vaults: dict[str, dict],
+    vault_root: Path,
+) -> tuple[dict[str, dict], bool]:
+    """Preserva vaults existentes e registra a raiz unificada quando ausente."""
+    normalized_root = str(vault_root.expanduser().resolve())
+    merged = copy.deepcopy(vaults)
+    for info in merged.values():
+        raw_path = str(info.get("path", "")).strip()
+        if raw_path and str(Path(raw_path).expanduser().resolve()) == normalized_root:
+            return merged, False
+    vault_id = hashlib.sha256(normalized_root.encode("utf-8")).hexdigest()[:16]
+    merged[vault_id] = {
+        "path": normalized_root,
+        "ts": int(datetime.now(timezone.utc).timestamp() * 1000),
+    }
+    return merged, True
+
 
 def run_obsidian_apply_mode(args: argparse.Namespace) -> None:
     if obsidian_is_windows_noop(args.target):
@@ -5845,6 +5863,15 @@ def run_obsidian_apply_mode(args: argparse.Namespace) -> None:
     map_pairs = parse_path_map_entries(args.map)
     pre_report = inspect_obsidian_config(target_kind, target_app_dir)
     print_obsidian_report("Pré-verificação (apply)", pre_report)
+    target_obsidian_json_path = target_app_dir / "obsidian.json"
+    existing_vaults: dict[str, dict] = {}
+    if target_obsidian_json_path.exists():
+        existing_payload = read_json_file(target_obsidian_json_path)
+        configured_vaults = existing_payload.get("vaults", {})
+        if not isinstance(configured_vaults, dict):
+            obsidian_fail("campo 'vaults' não é objeto no Obsidian de destino")
+        existing_vaults = configured_vaults
+
 
     if target_app_dir.exists():
         for existing_json in target_app_dir.glob("*.json"):
@@ -5856,7 +5883,7 @@ def run_obsidian_apply_mode(args: argparse.Namespace) -> None:
         copy_file_checked(bundled_json, target_app_dir / bundled_json.name, args.dry_run)
 
     source_vaults: dict[str, dict] = source_obsidian_json.get("vaults", {})
-    target_vaults: dict[str, dict] = {}
+    target_vaults: dict[str, dict] = copy.deepcopy(existing_vaults)
     for vault_id, vault_info in source_vaults.items():
         original_path = str(vault_info.get("path", "")).strip()
         if not original_path:
@@ -5892,12 +5919,19 @@ def run_obsidian_apply_mode(args: argparse.Namespace) -> None:
             **vault_info,
             "path": mapped_path,
         }
+    target_vaults, unified_vault_added = ensure_unified_vault_registry_entry(
+        target_vaults,
+        resolve_unified_vault_root(),
+    )
+    if unified_vault_added:
+        obsidian_log(f"Vault unificado registrado: {resolve_unified_vault_root()}")
+
 
     rewritten = {
         **source_obsidian_json,
         "vaults": target_vaults,
     }
-    write_json_file(target_app_dir / "obsidian.json", rewritten, args.dry_run)
+    write_json_file(target_obsidian_json_path, rewritten, args.dry_run)
     post_report = inspect_obsidian_config(target_kind, target_app_dir)
     print_obsidian_report("Pós-verificação (apply)", post_report)
     obsidian_log(f"Configuração aplicada em: {target_app_dir}")

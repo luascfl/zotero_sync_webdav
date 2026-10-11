@@ -342,6 +342,20 @@
         "Focused temporary-directory tests cover both the positive in-place classification and the existing ambiguity block.",
         "python3 -m py_compile zotero_sync_webdav.py zotero_storage_quota_audit.py and the focused tests pass."
       ]
+    },
+    {
+      "id": "US-017",
+      "title": "Preserve vault registrations during Obsidian setup",
+      "status": "done",
+      "dependsOn": [
+        "US-015"
+      ],
+      "description": "As an Obsidian user, I want setup to retain unrelated vault registrations while ensuring the unified Drive root is present.",
+      "acceptanceCriteria": [
+        "Existing vault registrations survive an Obsidian configuration apply.",
+        "The unified Drive root is added only when absent.",
+        "Focused tests cover preservation and idempotent registration without modifying a real Obsidian configuration."
+      ]
     }
   ]
 }

@@ -1,7 +1,7 @@
 # PRD Overview: Zotero WebDAV sync hardening
 
 - File: .context/prd_ralph/prd.json
-- Stories: 16 total (1 open, 0 in_progress, 15 done)
+- Stories: 17 total (1 open, 0 in_progress, 16 done)
 
 ## Quality Gates
 - python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
@@ -24,3 +24,4 @@
 - [todo] US-014: Content-hash view shared by report and sync (depends on: US-012)
 - [done] US-015: Make the Obsidian vault share the Drive root (depends on: US-012)
 - [done] US-016: Classify in-place PDFs by unified collection path (depends on: US-015)
+- [done] US-017: Preserve vault registrations during Obsidian setup (depends on: US-015)
