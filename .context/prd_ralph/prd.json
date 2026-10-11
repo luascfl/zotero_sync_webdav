@@ -401,6 +401,21 @@
         "A live API call writes no transport lines to the daily log.",
         "Focused test passes."
       ]
+    },
+    {
+      "id": "US-021",
+      "title": "Offline obsidian-setup with --skip-mirror",
+      "status": "done",
+      "dependsOn": [
+        "US-020"
+      ],
+      "description": "As an operator, I want to validate or apply only the Obsidian configuration without contacting the Zotero API.",
+      "acceptanceCriteria": [
+        "--skip-mirror applies the bundle and never connects to Zotero.",
+        "Default behavior (mirror after apply) is unchanged.",
+        "Live dry-run shows no API traffic.",
+        "Focused test passes."
+      ]
     }
   ]
 }

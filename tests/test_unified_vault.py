@@ -96,6 +96,21 @@ class UnifiedVaultTopologyTests(unittest.TestCase):
             paths = {entry["path"] for entry in registered.values()}
             self.assertEqual(paths, {str(other_vault), str(vault_root.resolve())})
 
+    def test_setup_skip_mirror_never_contacts_zotero(self):
+        import argparse
+        from unittest import mock
+
+        args = argparse.Namespace(
+            target="deb", app_dir=None, bundle="b", map=None,
+            create_missing_vaults=False, dry_run=True, apply=False, skip_mirror=True,
+        )
+        with mock.patch.object(zsync, "load_config"), \
+                mock.patch.object(zsync, "run_obsidian_apply_mode") as apply_mode, \
+                mock.patch.object(zsync, "connect_zotero_client") as connect:
+            zsync.run_obsidian_setup_mode(args)
+        apply_mode.assert_called_once()
+        connect.assert_not_called()
+
     def test_transport_logging_is_quiet_unless_explicitly_enabled(self):
         import logging
         from unittest import mock

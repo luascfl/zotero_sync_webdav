@@ -5974,6 +5974,9 @@ def run_obsidian_setup_mode(args: argparse.Namespace) -> None:
         apply=args.apply,
     )
     run_obsidian_apply_mode(apply_args)
+    if getattr(args, "skip_mirror", False):
+        obsidian_log("Espelho de coleções ignorado (--skip-mirror).")
+        return
     run_obsidian_mirror_mode(mirror_args)
 
 
@@ -6243,6 +6246,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     obsidian_setup_parser.add_argument('--create-missing-vaults', action='store_true', help='Cria vaults ausentes no destino')
     obsidian_setup_parser.add_argument('--dry-run', action='store_true', help='Simula sem escrever')
     obsidian_setup_parser.add_argument('--apply', action='store_true', help='Aplica de fato configuração e espelho')
+    obsidian_setup_parser.add_argument(
+        '--skip-mirror',
+        action='store_true',
+        help='Só configura o Obsidian, sem consultar o Zotero nem espelhar coleções',
+    )
 
     setup_parser = subparsers.add_parser(
         'setup-autostart',
