@@ -103,3 +103,16 @@ Story order:
 Dependencies:
 - Milestone 7's shared recursive scan is complete.
 - The existing collection-path model remains the sole source of physical collection paths.
+
+## Milestone 9: Two-way folder and collection sync
+Status: complete. Completed on 2026-10-10.
+
+Goal:
+Mirror structural changes between Drive/Obsidian folders and Zotero collections by identity. The ledger `.zotero_folders.json` (collection key to relative path) is the memory between runs; a rename becomes a rename on the side that did not change, not create plus move plus delete.
+
+Story order:
+1. US-023: Two-way sync between Drive folders and Zotero collections.
+
+Dependencies:
+- Milestone 8 complete (single physical root shared by Zotero PDFs and the Obsidian vault).
+- US-022 restored the helper functions and made the suite green.

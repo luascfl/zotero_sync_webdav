@@ -46,6 +46,10 @@ Use the GSD plus Ralph workflow for changes. GSD defines milestones and dependen
   ```bash
   python3 zotero_sync_webdav.py setup-autostart
   ```
+- Folder/collection sync plan only (the sync still runs, but renames and collection deletions are only logged and the ledger is not written):
+  ```bash
+  ZOTERO_FOLDER_SYNC_DRY_RUN=1 python3 zotero_sync_webdav.py sync
+  ```
 - Obsidian mirror dry run:
   ```bash
   python3 zotero_sync_webdav.py obsidian-mirror --dry-run

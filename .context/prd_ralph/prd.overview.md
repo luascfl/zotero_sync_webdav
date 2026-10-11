@@ -1,7 +1,7 @@
 # PRD Overview: Zotero WebDAV sync hardening
 
 - File: .context/prd_ralph/prd.json
-- Stories: 22 total (1 open, 0 in_progress, 21 done)
+- Stories: 23 total (1 open, 0 in_progress, 22 done)
 
 ## Quality Gates
 - python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
@@ -30,3 +30,4 @@
 - [done] US-020: Silence HTTP transport logs by default (depends on: US-019)
 - [done] US-021: Offline obsidian-setup with --skip-mirror (depends on: US-020)
 - [done] US-022: Restore code behind the 17 failing tests (depends on: US-021)
+- [done] US-023: Two-way sync between Drive folders and Zotero collections (depends on: US-022)

@@ -431,6 +431,25 @@
         "setup-autostart installs a launcher, a watcher unit and a timer without copying the script.",
         "python3 -m unittest discover -s tests runs 202 tests, all passing."
       ]
+    },
+    {
+      "id": "US-023",
+      "title": "Two-way sync between Drive folders and Zotero collections",
+      "status": "done",
+      "dependsOn": [
+        "US-022"
+      ],
+      "description": "As the owner of the unified vault, I want renaming, moving or removing a folder in the Drive/Obsidian vault, or a collection in Zotero, to be mirrored on the other side by identity (collection key), without recreating collections or re-moving every PDF.",
+      "acceptanceCriteria": [
+        "The .zotero_folders.json ledger (collection key -> relative path) is written atomically at the end of a clean run and read at the start of the next one.",
+        "A collection renamed or moved in Zotero renames the Drive directory in one operation, re-keys the hash cache, and never overwrites an existing directory.",
+        "A directory renamed on the Drive renames the Zotero collection in place (same key, items and subcollections kept) only when exactly one unmapped sibling folder matches the collection's PDFs on both sides.",
+        "reconcile_drive_collection_paths records old->new collection evidence; merge_drive_renamed_collections and cleanup_empty_duplicate_zotero_collections run after it and only delete empty, childless collections.",
+        "Safety: no drive-driven action when the ledger is non-empty but none of its folders exist (unmounted drive); at most 10 collection deletions per run; every rename/delete is appended to duplicate_actions.jsonl; ZOTERO_FOLDER_SYNC_DRY_RUN=1 logs the plan and changes nothing.",
+        "Deleting a collection in Zotero never deletes PDFs; deleting a non-empty folder never deletes a collection with items.",
+        "Tests cover each scenario with fake Zotero and temporary directories; the full suite stays green.",
+        "A ledger older than 14 days (ZOTERO_FOLDER_LEDGER_MAX_AGE_DAYS) is only renewed, never used to act."
+      ]
     }
   ]
 }

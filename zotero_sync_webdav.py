@@ -6081,6 +6081,7 @@ def reconcile_drive_collection_paths(
     key_to_path: Dict[str, str],
     stats: dict,
     ambiguous_drive_names: set[str],
+    move_evidence: dict[tuple[str, str], set] | None = None,
 ) -> None:
     """Alinha a coleção do Zotero ao caminho real já existente no drive quando houver conteúdo."""
     stats.setdefault('drive_authoritative_collection_updates', 0)
@@ -6127,6 +6128,11 @@ def reconcile_drive_collection_paths(
 
         target_item_key = data.get('parentItem') or key
         target_item = parent_items_by_key.get(data.get('parentItem')) if data.get('parentItem') else item
+        previous_collection_keys = [
+            collection_key
+            for collection_key in item_collection_keys_from_context(item, parent_items_by_key)
+            if collection_key in collection_by_key and collection_key != drive_collection_key
+        ]
         if sync_item_collections_to_drive_collection(
             zot,
             target_item_key,
@@ -6135,6 +6141,9 @@ def reconcile_drive_collection_paths(
             item=target_item,
         ):
             stats['drive_authoritative_collection_updates'] += 1
+            if move_evidence is not None:
+                for old_key in previous_collection_keys:
+                    move_evidence.setdefault((old_key, drive_collection_key), set()).add(target_item_key)
 
 
 DEFAULT_OBSIDIAN_SNAP_APP_DIR = Path.home() / "snap/obsidian/current/.config/obsidian"
@@ -6551,6 +6560,10 @@ def sync_item_collections_to_drive_collection(
         # enquanto o Zotero Desktop sincroniza. O PATCH precisa da versão atual.
         current_item = zot.item(item_key)
         item_data = dict(current_item.get("data") or current_item)
+        if item_data.get("deleted"):
+            # Item na lixeira: a coleção dele não é gerenciada e o PUT rejeitaria a chave `deleted`.
+            logging.debug("[COLLECTION] Item %s está na lixeira; coleção não alinhada.", item_key)
+            return False
         current_collections = list(item_data.get("collections") or [])
         unmanaged = [key for key in current_collections if key not in collection_by_key]
         managed = [key for key in current_collections if key in collection_by_key]
@@ -6592,9 +6605,29 @@ def _collection_version(collection: dict) -> int | None:
     return collection.get('version') or (collection.get('data') or {}).get('version')
 
 
-def _delete_empty_collection(zot: zotero.Zotero, collection: dict, reason: str) -> bool:
-    """Apaga uma coleção Zotero vazia; só devolve True quando a API confirma com 204."""
+def _delete_empty_collection(
+    zot: zotero.Zotero,
+    collection: dict,
+    reason: str,
+    stats: dict | None = None,
+) -> bool:
+    """Apaga uma coleção Zotero vazia; só devolve True quando a API confirma com 204.
+
+    Aplica o teto de apagamentos por execução, respeita o dry-run e deixa uma linha de
+    auditoria em duplicate_actions.jsonl.
+    """
     key = collection.get('key')
+    name = (collection.get('data') or {}).get('name', '')
+    stats = stats if stats is not None else {}
+    if stats.get('collections_deleted_this_run', 0) >= MAX_COLLECTION_DELETES_PER_RUN:
+        logging.warning(
+            "[COLLECTION] Teto de %d apagamentos por execução atingido; '%s' (%s) fica para a próxima.",
+            MAX_COLLECTION_DELETES_PER_RUN, name, key,
+        )
+        return False
+    if folder_sync_dry_run():
+        logging.info("[COLLECTION][dry-run] Apagaria a coleção vazia '%s' (%s): %s.", name, key, reason)
+        return False
     try:
         response = zot.delete_collection({'key': key, 'version': _collection_version(collection)})
     except Exception as exc:
@@ -6604,7 +6637,11 @@ def _delete_empty_collection(zot: zotero.Zotero, collection: dict, reason: str) 
     if status != 204:
         logging.warning("[COLLECTION] API recusou apagar a coleção %s (%s): HTTP %s", key, reason, status)
         return False
-    logging.info("[COLLECTION] Coleção vazia %s apagada (%s).", key, reason)
+    stats['collections_deleted_this_run'] = stats.get('collections_deleted_this_run', 0) + 1
+    record_duplicate_action({
+        'action': 'collection_delete', 'collection_key': key, 'original': name, 'reason': reason,
+    })
+    logging.info("[COLLECTION] Coleção vazia '%s' (%s) apagada (%s).", name, key, reason)
     return True
 
 
@@ -6648,7 +6685,7 @@ def cleanup_empty_duplicate_zotero_collections(
         for col in empty:
             if not re.search(r'\[[^\]]*\]\s*$', (col.get('data') or {}).get('name', '')):
                 continue
-            if _delete_empty_collection(zot, col, 'duplicata vazia'):
+            if _delete_empty_collection(zot, col, 'duplicata vazia', stats):
                 stats['deleted_empty_duplicate_collections'] += 1
                 changed = True
             else:
@@ -6701,7 +6738,7 @@ def merge_drive_renamed_collections(
         if not old_dir_empty or not new_dir_has_content or zot.collection_items(old_key, limit=1):
             stats['skipped_drive_renamed_collections'] += 1
             continue
-        if not _delete_empty_collection(zot, old, 'renomeada no drive'):
+        if not _delete_empty_collection(zot, old, 'renomeada no drive', stats):
             stats['skipped_drive_renamed_collections'] += 1
             continue
         if os.path.isdir(old_dir):
@@ -6731,6 +6768,424 @@ def sync_registered_folders_state(drive_root: str | Path, collection_by_key: dic
         logging.error("[COLLECTION] Não foi possível gravar %s: %s", state_file, exc)
         return False
     return True
+
+
+# --- Sincronização bidirecional pasta do drive <> coleção Zotero -----------------------
+#
+# A identidade estável de uma coleção é a chave Zotero. O livro-razão `.zotero_folders.json`
+# (chave -> caminho relativo da última execução limpa) permite distinguir "o usuário
+# renomeou/moveu/apagou" de "isto é novo". Cada mudança estrutural vira a operação
+# equivalente no lado que NÃO mudou, em vez de criar uma coleção nova, mover todos os PDFs
+# e apagar a antiga. Itens nunca são apagados por nenhum destes caminhos.
+
+FOLDER_LEDGER_NAME = '.zotero_folders.json'
+MAX_COLLECTION_DELETES_PER_RUN = 10
+FOLDER_RENAME_MIN_OVERLAP = 0.5
+
+
+def folder_sync_dry_run() -> bool:
+    """Com ZOTERO_FOLDER_SYNC_DRY_RUN=1 o plano é registrado no log e nada é alterado."""
+    return os.environ.get('ZOTERO_FOLDER_SYNC_DRY_RUN') == '1'
+
+
+def load_folder_ledger(drive_root: str | Path) -> dict[str, str]:
+    """Lê o livro-razão chave -> caminho. Arquivo ausente ou ilegível equivale a vazio."""
+    state_file = Path(drive_root) / FOLDER_LEDGER_NAME
+    try:
+        raw = json.loads(state_file.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        logging.warning("[FOLDER-SYNC] Livro-razão ilegível (%s); tratado como ausente.", exc)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v}
+
+
+def folder_ledger_max_age_days() -> int:
+    """Idade máxima do livro-razão para ainda valer como memória (ZOTERO_FOLDER_LEDGER_MAX_AGE_DAYS)."""
+    try:
+        return max(1, int(os.environ.get('ZOTERO_FOLDER_LEDGER_MAX_AGE_DAYS', '14')))
+    except ValueError:
+        return 14
+
+
+def folder_ledger_age_days(drive_root: str | Path) -> float | None:
+    try:
+        return (time.time() - os.path.getmtime(Path(drive_root) / FOLDER_LEDGER_NAME)) / 86400
+    except OSError:
+        return None
+
+
+def _vault_dir(drive_root: str | Path, relative_path: str) -> str:
+    return os.path.join(str(drive_root), *relative_path.split('/'))
+
+
+def _dir_has_files(path: str) -> bool:
+    """True se houver qualquer arquivo visível sob `path` (PDFs, notas .md, anexos)."""
+    for _root, _dirs, files in os.walk(path):
+        if any(not name.startswith('.') for name in files):
+            return True
+    return False
+
+
+def _remove_empty_tree(path: str) -> bool:
+    """Remove uma árvore sem nenhum arquivo. Falha (False) se sobrar qualquer arquivo."""
+    try:
+        for root, _dirs, _files in os.walk(path, topdown=False):
+            os.rmdir(root)
+    except OSError:
+        return False
+    return True
+
+
+def rename_cache_prefix(cache: Dict[str, dict], old_dir: str, new_dir: str) -> int:
+    """Move no cache de hash todas as entradas de uma pasta renomeada, sem rehashear."""
+    old_prefix = _normalize_cache_path(old_dir).rstrip(os.sep) + os.sep
+    new_prefix = _normalize_cache_path(new_dir).rstrip(os.sep) + os.sep
+    moved = [key for key in cache if key.startswith(old_prefix)]
+    for key in moved:
+        cache[new_prefix + key[len(old_prefix):]] = cache.pop(key)
+    return len(moved)
+
+
+def drive_ledger_is_healthy(drive_root: str | Path, ledger: dict[str, str]) -> bool:
+    """Evita agir sobre um mount vazio ou desmontado.
+
+    Se o livro-razão lembra de pastas e NENHUMA existe, o drive provavelmente não está
+    montado: tratar isso como "todas as pastas foram apagadas" removeria coleções à toa.
+    """
+    if not os.path.isdir(str(drive_root)):
+        return False
+    if not ledger:
+        return True
+    return any(os.path.isdir(_vault_dir(drive_root, rel)) for rel in ledger.values())
+
+
+def build_collection_pdf_names(
+    attachments: List[dict],
+    parent_items_by_key: dict[str, dict],
+) -> dict[str, set[str]]:
+    """Nomes normalizados dos PDFs de cada coleção, pelo nome original e pelo canônico."""
+    names: dict[str, set[str]] = {}
+    for item in attachments:
+        if not attachment_is_pdf(item):
+            continue
+        data = item.get('data', {})
+        filename = get_filename_from_item(item)
+        if not filename:
+            continue
+        variants = {normalize_aggressive(os.path.basename(filename))}
+        canonical = canonical_parent_pdf_filename(parent_items_by_key.get(data.get('parentItem')))
+        if canonical:
+            variants.add(normalize_aggressive(canonical))
+        variants.discard('')
+        for collection_key in item_collection_keys_from_context(item, parent_items_by_key):
+            names.setdefault(collection_key, set()).update(variants)
+    return names
+
+
+def plan_collection_folder_actions(
+    collection_by_key: dict[str, dict],
+    ledger: dict[str, str],
+    drive_root: str | Path,
+    pdf_names_by_collection: dict[str, set[str]],
+    path_to_key: dict[str, str],
+) -> list[dict]:
+    """Compara livro-razão, Zotero e drive e devolve as ações; só lê, nunca escreve."""
+    from collections import Counter as _Counter
+
+    actions: list[dict] = []
+    renamed_prefixes: list[tuple[str, str]] = []
+
+    # 1. Mudanças feitas no Zotero: o caminho atual difere do lembrado. Rasas primeiro,
+    #    para que renomear um pai leve os filhos junto (caminho efetivo igual ao novo).
+    def _depth(key: str) -> int:
+        col = collection_by_key.get(key)
+        return (col['relative_path'] if col else ledger[key]).count('/')
+
+    for key in sorted(ledger, key=lambda k: (_depth(k), k)):
+        old = ledger[key]
+        for src, dst in renamed_prefixes:
+            if old == src or old.startswith(src + '/'):
+                old = dst + old[len(src):]
+        col = collection_by_key.get(key)
+        if col is None:
+            old_dir = _vault_dir(drive_root, old)
+            if os.path.isdir(old_dir) and not _dir_has_files(old_dir):
+                actions.append({'type': 'remove_empty_drive_dir', 'key': key, 'path': old})
+            continue
+        new = col['relative_path']
+        if old != new:
+            actions.append({'type': 'rename_drive_dir', 'key': key, 'old': old, 'new': new})
+            renamed_prefixes.append((old, new))
+
+    # 2. Mudanças feitas no drive: o Zotero ainda bate com o razão, mas a pasta sumiu.
+    vanished: list[str] = []
+    for key in sorted(collection_by_key, key=lambda k: collection_by_key[k]['relative_path'].count('/')):
+        path = collection_by_key[key]['relative_path']
+        if ledger.get(key) != path or os.path.isdir(_vault_dir(drive_root, path)):
+            continue
+        parent_rel = path.rpartition('/')[0]
+        parent_dir = _vault_dir(drive_root, parent_rel) if parent_rel else str(drive_root)
+        if os.path.isdir(parent_dir):  # pai ausente: tratado no nível do ancestral
+            vanished.append(key)
+
+    proposals: list[tuple[str, str, str]] = []
+    for key in vanished:
+        zotero_names = pdf_names_by_collection.get(key) or set()
+        if not zotero_names:
+            continue
+        parent_rel = collection_by_key[key]['relative_path'].rpartition('/')[0]
+        parent_dir = _vault_dir(drive_root, parent_rel) if parent_rel else str(drive_root)
+        try:
+            siblings = sorted(os.scandir(parent_dir), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in siblings:
+            if not entry.is_dir() or entry.name.startswith('.'):
+                continue
+            rel = f"{parent_rel}/{entry.name}" if parent_rel else entry.name
+            if normalize_relative_path_key(rel) in path_to_key:
+                continue
+            try:
+                drive_names = {
+                    normalize_aggressive(child.name)
+                    for child in os.scandir(entry.path)
+                    if child.is_file() and child.name.lower().endswith('.pdf')
+                }
+            except OSError:
+                continue
+            matched = len(drive_names & zotero_names)
+            if (
+                matched
+                and matched / len(drive_names) >= FOLDER_RENAME_MIN_OVERLAP
+                and matched / len(zotero_names) >= FOLDER_RENAME_MIN_OVERLAP
+            ):
+                proposals.append((key, rel, entry.name))
+
+    per_key = _Counter(p[0] for p in proposals)
+    per_dir = _Counter(p[1] for p in proposals)
+    for key, rel, new_name in proposals:
+        if per_key[key] == 1 and per_dir[rel] == 1:
+            actions.append({
+                'type': 'rename_collection', 'key': key,
+                'old_name': collection_by_key[key]['name'], 'new_name': new_name, 'path': rel,
+            })
+        else:
+            actions.append({'type': 'conflict', 'key': key, 'reason': f"renomeação ambígua para '{rel}'"})
+
+    # 3. Pasta apagada sem destino identificável: só coleção vazia e sem filhos é removida.
+    has_children = {col['parent'] for col in collection_by_key.values() if col.get('parent')}
+    proposed_keys = {p[0] for p in proposals}
+    for key in vanished:
+        if key in proposed_keys or key in has_children or pdf_names_by_collection.get(key):
+            continue
+        actions.append({
+            'type': 'delete_empty_collection', 'key': key,
+            'path': collection_by_key[key]['relative_path'],
+        })
+    return actions
+
+
+def apply_collection_folder_actions(
+    zot: zotero.Zotero,
+    actions: list[dict],
+    collections: List[dict],
+    drive_root: str | Path,
+    stats: dict,
+    dry_run: bool = False,
+) -> tuple[bool, bool]:
+    """Executa o plano. Devolve (drive_mudou, coleções_mudaram)."""
+    raw_by_key = {col['key']: col for col in collections if col.get('key')}
+    drive_changed = collections_changed = False
+    prefix = '[FOLDER-SYNC][dry-run]' if dry_run else '[FOLDER-SYNC]'
+
+    for action in actions:
+        kind = action['type']
+        key = action.get('key')
+        if kind == 'conflict':
+            stats['folder_sync_conflicts'] += 1
+            logging.warning("%s Conflito na coleção %s: %s.", prefix, key, action['reason'])
+
+        elif kind == 'rename_drive_dir':
+            src = _vault_dir(drive_root, action['old'])
+            dst = _vault_dir(drive_root, action['new'])
+            if not os.path.isdir(src):
+                continue  # já veio junto com o pai, ou nunca existiu
+            if os.path.exists(dst) and not _dir_has_files(dst) and _dir_has_files(src):
+                if not dry_run and not _remove_empty_tree(dst):
+                    stats['folder_sync_conflicts'] += 1
+                    logging.warning("%s Destino '%s' existe e não está vazio.", prefix, action['new'])
+                    continue
+            elif os.path.exists(dst):
+                if not _dir_has_files(src):
+                    logging.info("%s Pasta antiga vazia '%s' removida (destino '%s' já existe).", prefix, action['old'], action['new'])
+                    if not dry_run:
+                        _remove_empty_tree(src)
+                        drive_changed = True
+                else:
+                    stats['folder_sync_conflicts'] += 1
+                    logging.warning(
+                        "%s '%s' e '%s' têm conteúdo; nada foi movido. Os arquivos serão realocados um a um.",
+                        prefix, action['old'], action['new'],
+                    )
+                continue
+            logging.info("%s Coleção movida/renomeada no Zotero: pasta '%s' -> '%s'.", prefix, action['old'], action['new'])
+            if dry_run:
+                continue
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                os.rename(src, dst)
+            except OSError as exc:
+                stats['folder_sync_errors'] += 1
+                logging.error("%s Falha ao renomear a pasta '%s': %s", prefix, action['old'], exc)
+                continue
+            rename_cache_prefix(HASH_CACHE, src, dst)
+            record_duplicate_action({
+                'action': 'folder_rename', 'collection_key': key,
+                'original': action['old'], 'kept': action['new'], 'reason': 'coleção renomeada no Zotero',
+            })
+            stats['folder_sync_drive_renames'] += 1
+            drive_changed = True
+
+        elif kind == 'rename_collection':
+            raw = raw_by_key.get(key)
+            if raw is None:
+                continue
+            logging.info(
+                "%s Pasta renomeada no drive: coleção %s '%s' -> '%s'.",
+                prefix, key, action['old_name'], action['new_name'],
+            )
+            if dry_run:
+                continue
+            payload = dict(raw.get('data') or {})
+            payload.update({'key': key, 'name': action['new_name'], 'version': _collection_version(raw)})
+            try:
+                response = zot.update_collection(payload)
+            except Exception as exc:
+                stats['folder_sync_errors'] += 1
+                logging.error("%s Falha ao renomear a coleção %s: %s", prefix, key, exc)
+                continue
+            status = getattr(response, 'status_code', None)
+            if status not in (200, 204):
+                stats['folder_sync_errors'] += 1
+                logging.warning("%s API recusou renomear a coleção %s: HTTP %s", prefix, key, status)
+                continue
+            record_duplicate_action({
+                'action': 'collection_rename', 'collection_key': key,
+                'original': action['old_name'], 'kept': action['new_name'], 'reason': 'pasta renomeada no drive',
+            })
+            stats['folder_sync_collection_renames'] += 1
+            collections_changed = True
+
+        elif kind == 'delete_empty_collection':
+            raw = raw_by_key.get(key)
+            if raw is None:
+                continue
+            try:
+                occupied = bool(zot.collection_items(key, limit=1))
+            except Exception as exc:
+                stats['folder_sync_errors'] += 1
+                logging.warning("%s Não foi possível checar a coleção %s: %s", prefix, key, exc)
+                continue
+            if occupied:
+                continue  # tem itens: a pasta será recriada, nada é apagado
+            if _delete_empty_collection(zot, raw, 'pasta removida do drive', stats):
+                stats['folder_sync_collection_deletes'] += 1
+                collections_changed = True
+
+        elif kind == 'remove_empty_drive_dir':
+            logging.info("%s Coleção apagada no Zotero: pasta vazia '%s' removida.", prefix, action['path'])
+            if not dry_run and _remove_empty_tree(_vault_dir(drive_root, action['path'])):
+                drive_changed = True
+    return drive_changed, collections_changed
+
+
+def reconcile_collection_folder_renames(
+    zot: zotero.Zotero,
+    collections: List[dict],
+    attachments: List[dict],
+    parent_items_by_key: dict[str, dict],
+    drive_root: str | Path,
+    stats: dict,
+    drive_scan: 'DriveScan | None' = None,
+) -> bool:
+    """Passo do sync: planeja e aplica renomeações/remoções entre pastas e coleções.
+
+    Devolve True quando coleções do Zotero mudaram (o chamador deve recarregá-las).
+    """
+    for counter in (
+        'folder_sync_drive_renames', 'folder_sync_collection_renames',
+        'folder_sync_collection_deletes', 'folder_sync_conflicts', 'folder_sync_errors',
+    ):
+        stats.setdefault(counter, 0)
+    ledger = load_folder_ledger(drive_root)
+    if not ledger:
+        logging.info("[FOLDER-SYNC] Sem livro-razão anterior; esta execução apenas o cria.")
+        return False
+    age_days = folder_ledger_age_days(drive_root)
+    if age_days is not None and age_days > folder_ledger_max_age_days():
+        logging.warning(
+            "[FOLDER-SYNC] Livro-razão com %.0f dias (limite %d): defasado demais para decidir o que foi "
+            "renomeado ou apagado. Esta execução apenas o renova.", age_days, folder_ledger_max_age_days(),
+        )
+        return False
+    if not drive_ledger_is_healthy(drive_root, ledger):
+        stats['folder_sync_blocked'] = True
+        stats['folder_sync_errors'] += 1
+        logging.error(
+            "[FOLDER-SYNC] Nenhuma pasta do livro-razão existe em '%s'; o drive parece desmontado. "
+            "Nenhuma ação estrutural será feita nesta execução.", drive_root,
+        )
+        return False
+    collection_by_key, _children, path_to_key = build_collection_path_model(collections)
+    actions = plan_collection_folder_actions(
+        collection_by_key, ledger, drive_root,
+        build_collection_pdf_names(attachments, parent_items_by_key), path_to_key,
+    )
+    if not actions:
+        return False
+    logging.info("[FOLDER-SYNC] %d ação(ões) planejada(s).", len(actions))
+    drive_changed, collections_changed = apply_collection_folder_actions(
+        zot, actions, collections, drive_root, stats, dry_run=folder_sync_dry_run(),
+    )
+    if drive_changed and drive_scan is not None:
+        drive_scan.invalidate()
+    return collections_changed
+
+
+def prune_superseded_collections(
+    zot: zotero.Zotero,
+    collections: List[dict],
+    drive_root: str | Path,
+    move_evidence: dict[tuple[str, str], set],
+    stats: dict,
+) -> bool:
+    """Apaga coleções vazias que sobraram: renomeadas no drive (com evidência) e duplicatas."""
+    if stats.get('folder_sync_blocked'):
+        return False
+    merged = merge_drive_renamed_collections(zot, collections, str(drive_root), move_evidence, stats)
+    if merged:  # versões das coleções mudaram; a limpeza precisa da lista nova
+        collections = fetch_zotero_collections(zot)
+    cleaned = cleanup_empty_duplicate_zotero_collections(zot, collections, stats)
+    return merged or cleaned
+
+
+def write_folder_ledger_if_clean(
+    drive_root: str | Path,
+    collection_by_key: dict[str, dict],
+    stats: dict,
+) -> bool:
+    """Grava o livro-razão no fim de uma execução sem falha estrutural."""
+    if folder_sync_dry_run():
+        logging.info("[FOLDER-SYNC][dry-run] Livro-razão não gravado.")
+        return False
+    if stats.get('folder_sync_blocked') or stats.get('folder_sync_errors'):
+        logging.warning("[FOLDER-SYNC] Livro-razão mantido: houve falha estrutural nesta execução.")
+        return False
+    return sync_registered_folders_state(drive_root, collection_by_key)
 
 
 def collect_nonempty_directory_paths(root: str | Path) -> list[str]:
@@ -7593,15 +8048,7 @@ def ensure_single_instance() -> None:
         logging.warning("[SYSTEM] Não foi possível criar arquivo de lock de instância: %s", e)
 
 def get_registered_folders(target_folder: str) -> dict[str, str]:
-    import json
-    state_file = os.path.join(target_folder, ".zotero_folders.json")
-    if os.path.exists(state_file):
-        try:
-            with open(state_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    return load_folder_ledger(target_folder)
 
 def preprocess_drive_duplicate_folders(target_folder: str, stats: dict) -> None:
     import shutil
@@ -7740,6 +8187,13 @@ def run_sync_mode(notification_policy: dict | None = None):
         'preprocessed_drive_copy_variants': 0,
         'blocked_drive_copy_variants': 0,
         'moved_drive_files_to_collection': 0,
+        'folder_sync_drive_renames': 0,
+        'folder_sync_collection_renames': 0,
+        'folder_sync_collection_deletes': 0,
+        'folder_sync_conflicts': 0,
+        'folder_sync_errors': 0,
+        'merged_drive_renamed_collections': 0,
+        'deleted_empty_duplicate_collections': 0,
         'review_tags_applied': 0,
         'review_tags_removed': 0,
         'current_review_duplicate_keys': set(),
@@ -7858,6 +8312,10 @@ def run_sync_mode(notification_policy: dict | None = None):
         stats['zotero_unique_filenames'] = len(existing_filenames)
 
     collections = fetch_zotero_collections(zot)
+    if reconcile_collection_folder_renames(
+        zot, collections, all_attachments, parent_items_by_key, TARGET_FOLDER, stats, drive_scan,
+    ):
+        collections = fetch_zotero_collections(zot)
     collection_by_key, collection_children, collection_path_to_key = build_collection_path_model(collections)
     if ensure_drive_content_collections(
         zot,
@@ -7889,6 +8347,7 @@ def run_sync_mode(notification_policy: dict | None = None):
             "[CONFLITO] PDF '%s' existe em mais de uma pasta do drive; coleção do item não será alterada automaticamente.",
             ambiguous_name,
         )
+    collection_move_evidence: dict[tuple[str, str], set] = {}
     reconcile_drive_collection_paths(
         zot,
         all_attachments,
@@ -7900,6 +8359,7 @@ def run_sync_mode(notification_policy: dict | None = None):
         key_to_path,
         stats,
         ambiguous_drive_names,
+        collection_move_evidence,
     )
     desktop_import_available = ensure_desktop_recognizer_available(stats)
 
@@ -8485,7 +8945,13 @@ def run_sync_mode(notification_policy: dict | None = None):
             key_to_path,
             stats,
             ambiguous_drive_names,
+            collection_move_evidence,
         )
+        if prune_superseded_collections(
+            zot, fetch_zotero_collections(zot), TARGET_FOLDER, collection_move_evidence, stats,
+        ):
+            collections = fetch_zotero_collections(zot)
+            collection_by_key, collection_children, collection_path_to_key = build_collection_path_model(collections)
     except Exception as e:
         logging.error(f"Erro ao processar arquivos da pasta: {e}")
         finalize_execution(stats)
@@ -8505,6 +8971,8 @@ def run_sync_mode(notification_policy: dict | None = None):
         except Exception as exc:
             stats["web_cache_errors"] += 1
             logging.error("[WEB-CACHE] Reconciliação interrompida: %s", exc)
+
+    write_folder_ledger_if_clean(TARGET_FOLDER, collection_by_key, stats)
 
     # 5. Relatório final
     total_verificados = stats['processed'] or stats['folder_checked_pdfs']
@@ -8560,6 +9028,10 @@ def run_sync_mode(notification_policy: dict | None = None):
 │ Coleções criadas do drive: {stats['created_zotero_collections_from_drive']:<14} │
 │ Arquivos realocados à coleção: {stats['moved_drive_files_to_collection']:<14} │
 │ Coleções alinhadas ao drive: {stats['drive_authoritative_collection_updates']:<13} │
+│ Pastas renomeadas no drive: {stats['folder_sync_drive_renames']:<13} │
+│ Coleções renomeadas: {stats['folder_sync_collection_renames']:<20} │
+│ Coleções vazias removidas: {stats['folder_sync_collection_deletes'] + stats['merged_drive_renamed_collections'] + stats['deleted_empty_duplicate_collections']:<14} │
+│ Conflitos pasta/coleção: {stats['folder_sync_conflicts']:<16} │
 │ 🧹 Duplicados removidos: {stats['pruned_drive_duplicates']:<22} │
 │ ⬇️  Baixados do Zotero: {stats['downloaded_zotero']:<24} │
 │ 📤 Materializados no drive: {stats['materialized_drive']:<20} │

@@ -7,6 +7,20 @@ from types import SimpleNamespace
 import zotero_sync_webdav as zsync
 
 
+_AUDIT_DIR = tempfile.TemporaryDirectory()
+_ORIGINAL_AUDIT_LOG = zsync.DUPLICATE_ACTIONS_LOG
+
+
+def setUpModule():
+    """A auditoria de apagamentos não pode escrever no log real do usuário."""
+    zsync.DUPLICATE_ACTIONS_LOG = str(Path(_AUDIT_DIR.name) / "duplicate_actions.jsonl")
+
+
+def tearDownModule():
+    zsync.DUPLICATE_ACTIONS_LOG = _ORIGINAL_AUDIT_LOG
+    _AUDIT_DIR.cleanup()
+
+
 def make_collection(key, name, parent=None, version=1):
     return {
         "key": key,
