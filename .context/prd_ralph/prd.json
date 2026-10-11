@@ -416,6 +416,21 @@
         "Live dry-run shows no API traffic.",
         "Focused test passes."
       ]
+    },
+    {
+      "id": "US-022",
+      "title": "Restore code behind the 17 failing tests",
+      "status": "done",
+      "dependsOn": [
+        "US-021"
+      ],
+      "description": "As a maintainer, I want the full suite green. Seventeen tests failed because the code they cover was never committed (tests landed in 73726e3, the implementation did not).",
+      "acceptanceCriteria": [
+        "Duplicate/renamed collection cleanup helpers exist and are covered.",
+        "Diagnostic report reports scan failures truthfully (scan_ok).",
+        "setup-autostart installs a launcher, a watcher unit and a timer without copying the script.",
+        "python3 -m unittest discover -s tests runs 202 tests, all passing."
+      ]
     }
   ]
 }
