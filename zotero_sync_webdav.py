@@ -328,6 +328,15 @@ CONTENT_PROBE_TIMEOUT_SECONDS = get_env_int(
     "ZOTERO_CONTENT_PROBE_TIMEOUT_SECONDS",
     CONTENT_PROBE_TIMEOUT_SECONDS_DEFAULT,
 )
+
+# A quarentena de timeout expira e o limite cresce com o tamanho; ver hash_timeout_for_size().
+HASH_TIMEOUT_QUARANTINE_MARK = "QUARANTINE_TIMEOUT"
+HASH_QUARANTINE_TTL_HOURS = max(1, get_env_int("ZOTERO_HASH_QUARANTINE_TTL_HOURS", 6))
+HASH_TIMEOUT_MAX_SECONDS = get_env_int("ZOTERO_HASH_TIMEOUT_MAX_SECONDS", 300)
+HASH_MIN_THROUGHPUT_BYTES_PER_SECOND = 768 * 1024
+HASH_TIMEOUT_BREAKER = 3
+_HASH_RUN_STATE = {"timeouts": 0}
+
 PYZOTERO_UPLOAD_TIMEOUT_SECONDS = get_env_int(
     "ZOTERO_UPLOAD_TIMEOUT_SECONDS",
     PYZOTERO_UPLOAD_TIMEOUT_SECONDS_DEFAULT,
@@ -4365,6 +4374,14 @@ def save_hash_cache(cache: Dict[str, dict]) -> None:
         logging.warning("[CACHE] Falha ao salvar cache: %s", exc)
 
 
+def hash_quarantine_expired(entry: dict, now: float | None = None) -> bool:
+    """Uma entrada de quarentena sem carimbo (formato antigo) conta como vencida."""
+    quarantined_at = entry.get("quarantined_at")
+    if not quarantined_at:
+        return True
+    return ((now if now is not None else time.time()) - quarantined_at) >= HASH_QUARANTINE_TTL_HOURS * 3600
+
+
 def get_cached_hash(path: str, cache: Dict[str, dict], stat_result: os.stat_result | None = None) -> str | None:
     """Recupera um hash do cache se mtime e tamanho coincidirem."""
     abspath = _normalize_cache_path(path)
@@ -4393,10 +4410,19 @@ def get_cached_hash(path: str, cache: Dict[str, dict], stat_result: os.stat_resu
     else:
         return None
 
-    return entry.get("hash")
+    cached = entry.get("hash")
+    if cached == HASH_TIMEOUT_QUARANTINE_MARK and hash_quarantine_expired(entry):
+        return None  # Quarentena vencida: o arquivo volta a ser tentado.
+    return cached
 
 
-def set_cached_hash(path: str, file_hash: str, cache: Dict[str, dict], stat_result: os.stat_result | None = None) -> None:
+def set_cached_hash(
+    path: str,
+    file_hash: str,
+    cache: Dict[str, dict],
+    stat_result: os.stat_result | None = None,
+    quarantined_at: float | None = None,
+) -> None:
     """Armazena no cache o hash calculado para um arquivo."""
     abspath = _normalize_cache_path(path)
     try:
@@ -4412,6 +4438,8 @@ def set_cached_hash(path: str, file_hash: str, cache: Dict[str, dict], stat_resu
         entry["mtime_ns"] = stat.st_mtime_ns  # type: ignore[attr-defined]
     else:
         entry["mtime"] = stat.st_mtime
+    if quarantined_at is not None:
+        entry["quarantined_at"] = quarantined_at
     cache[abspath] = entry
 
 
@@ -4620,6 +4648,21 @@ def relocate_drive_file(
         return current_path
 
 
+def hash_timeout_for_size(size_bytes: int) -> int:
+    """Limite de leitura para o hash de um arquivo: cresce com o tamanho, até um teto.
+
+    Um limite fixo de 30 s derrubava PDFs de 30 a 330 MB lidos pelo rclone (cerca de 1 a 2 MB/s
+    na primeira leitura, instantânea nas seguintes pelo cache do mount). Depois de
+    HASH_TIMEOUT_BREAKER estouros no mesmo sync o mount provavelmente está ruim, e o limite
+    volta ao básico para não travar a rodada.
+    """
+    base = HASH_READ_TIMEOUT_SECONDS
+    if base <= 0 or _HASH_RUN_STATE["timeouts"] >= HASH_TIMEOUT_BREAKER:
+        return base
+    needed = -(-int(size_bytes) // HASH_MIN_THROUGHPUT_BYTES_PER_SECOND)
+    return min(max(base, needed), max(base, HASH_TIMEOUT_MAX_SECONDS))
+
+
 def compute_sha256(
     path: str,
     cache: Dict[str, dict] | None = None,
@@ -4636,14 +4679,14 @@ def compute_sha256(
 
     if cache_ref is not None:
         cached = get_cached_hash(abspath, cache_ref, stat)
-        if cached == "QUARANTINE_TIMEOUT":
+        if cached == HASH_TIMEOUT_QUARANTINE_MARK:
             logging.warning("[HASH] Arquivo ignorado (quarentena de timeout recente): '%s'.", path)
             return None
         if cached:
             logging.debug("[HASH] Cache hit para '%s'.", path)
             return cached
 
-    effective_timeout = HASH_READ_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    effective_timeout = hash_timeout_for_size(stat.st_size) if timeout_seconds is None else timeout_seconds
     size_mb = stat.st_size / (1024 * 1024)
     logging.info(
         "[HASH] Calculando SHA-256 de '%s' (%.1f MiB, timeout=%ss).",
@@ -4677,13 +4720,17 @@ def compute_sha256(
         elapsed = time.monotonic() - started_at
         logging.info("[HASH] SHA-256 concluído para '%s' em %.1fs.", path, elapsed)
     except TimeoutError:
+        _HASH_RUN_STATE["timeouts"] += 1
         logging.error(
-            "[HASH] Timeout após %ss ao calcular SHA-256 de '%s'. Adicionado à quarentena.",
+            "[HASH] Timeout após %ss ao calcular SHA-256 de '%s' (%.1f MiB). Em quarentena por %dh; "
+            "depois disso uma nova tentativa usa um limite maior.",
             effective_timeout,
             path,
+            size_mb,
+            HASH_QUARANTINE_TTL_HOURS,
         )
         if cache_ref is not None:
-            set_cached_hash(abspath, "QUARANTINE_TIMEOUT", cache_ref, stat)
+            set_cached_hash(abspath, HASH_TIMEOUT_QUARANTINE_MARK, cache_ref, stat, quarantined_at=time.time())
         return None
     except OSError as exc:
         logging.warning("[HASH] Não foi possível calcular hash de '%s': %s", path, exc)
@@ -8279,6 +8326,7 @@ def run_sync_mode(notification_policy: dict | None = None):
         send_sync_progress_notification(build_first_open_sync_notification_body())
     configure_pyzotero_upload_transport()
     purge_quarantine()
+    _HASH_RUN_STATE["timeouts"] = 0
     
     # 0. Preflight
     pf_errors = preflight_checks()

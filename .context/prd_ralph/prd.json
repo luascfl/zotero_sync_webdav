@@ -481,6 +481,22 @@
         "The workflow runs on schedule and on demand only, never on pull_request, with contents: read, secrets scoped to the steps that use them, and pipefail so a failure is not hidden by tee; missing secrets end the run cleanly with a notice.",
         "The full suite stays green."
       ]
+    },
+    {
+      "id": "US-026",
+      "title": "Hash timeout quarantine expires and scales with file size",
+      "status": "done",
+      "dependsOn": [
+        "US-025"
+      ],
+      "description": "As the owner, I want PDFs that exceeded the hash read timeout to be retried instead of skipped forever, so large files are reconciled.",
+      "acceptanceCriteria": [
+        "A timeout quarantine entry carries a timestamp and expires after ZOTERO_HASH_QUARANTINE_TTL_HOURS (default 6); an entry without a timestamp, as written by the old code, counts as expired.",
+        "The read timeout grows with the file size at 0.75 MiB/s, never below ZOTERO_HASH_TIMEOUT_SECONDS and capped at ZOTERO_HASH_TIMEOUT_MAX_SECONDS (default 300); an explicit timeout_seconds is respected.",
+        "After 3 timeouts in one sync the timeout falls back to the base value, so a broken mount cannot stall the run.",
+        "A changed file still ignores its quarantine; tests cover expiry, legacy entries, scaling, the breaker and the stamp.",
+        "A real retry of quarantined files succeeds."
+      ]
     }
   ]
 }
