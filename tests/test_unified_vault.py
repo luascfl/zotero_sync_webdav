@@ -96,6 +96,22 @@ class UnifiedVaultTopologyTests(unittest.TestCase):
             paths = {entry["path"] for entry in registered.values()}
             self.assertEqual(paths, {str(other_vault), str(vault_root.resolve())})
 
+    def test_transport_logging_is_quiet_unless_explicitly_enabled(self):
+        import logging
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ZOTERO_HTTP_DEBUG", None)
+            zsync.configure_transport_logging()
+            self.assertEqual(logging.getLogger("httpcore").level, logging.WARNING)
+            self.assertEqual(logging.getLogger("httpx").level, logging.WARNING)
+
+            os.environ["ZOTERO_HTTP_DEBUG"] = "1"
+            zsync.configure_transport_logging()
+            self.assertEqual(logging.getLogger("httpcore").level, logging.DEBUG)
+
+        zsync.configure_transport_logging()
+
     def test_collection_directories_are_created_once_in_unified_root(self):
         collections = [
             {"key": "ROOT", "data": {"name": "Curso"}},

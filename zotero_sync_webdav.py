@@ -533,6 +533,18 @@ logging.basicConfig(
     handlers=handlers,
 )
 
+# Transporte HTTP gera dezenas de linhas por chamada; só entra com ZOTERO_HTTP_DEBUG=1.
+NOISY_TRANSPORT_LOGGERS = ("httpcore", "httpx", "hpack")
+
+
+def configure_transport_logging() -> None:
+    level = logging.DEBUG if os.environ.get("ZOTERO_HTTP_DEBUG") == "1" else logging.WARNING
+    for name in NOISY_TRANSPORT_LOGGERS:
+        logging.getLogger(name).setLevel(level)
+
+
+configure_transport_logging()
+
 if LOG_FILE_PATH:
     logging.info("Log diário: %s", LOG_FILE_PATH)
 else:

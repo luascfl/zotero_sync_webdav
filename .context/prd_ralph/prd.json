@@ -386,6 +386,21 @@
         "The mirror receives the unified root and no real Obsidian config, Drive or Zotero API is touched.",
         "The focused test passes."
       ]
+    },
+    {
+      "id": "US-020",
+      "title": "Silence HTTP transport logs by default",
+      "status": "done",
+      "dependsOn": [
+        "US-019"
+      ],
+      "description": "As an operator, I want httpcore, httpx and hpack debug output hidden in normal runs so daily logs stay small and readable.",
+      "acceptanceCriteria": [
+        "Transport loggers default to WARNING while application debug stays on.",
+        "ZOTERO_HTTP_DEBUG=1 restores transport debug.",
+        "A live API call writes no transport lines to the daily log.",
+        "Focused test passes."
+      ]
     }
   ]
 }
