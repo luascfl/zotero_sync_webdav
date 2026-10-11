@@ -79,7 +79,7 @@ O GitHub Actions roda a mesma suíte a cada push, em `.github/workflows/tests.ym
 
 Isto ainda não está implementado. Decisão: o sync **não** vai gravar `.zip` e `.prop` direto no WebDAV do Koofr. Um arquivo fora do padrão faria o Zotero marcar o anexo como corrompido, e o risco não compensa. A importação de PDFs continua exclusiva do Zotero Desktop, pelo recognizer, que é o caminho oficial.
 
-Rodar fora do PC significa então um modo sem importação: sincronização de pastas e coleções, renomeações, relatório e limpeza de duplicatas funcionam só com a API do Zotero e a leitura do Drive. PDFs novos ficam na fila de importação até uma máquina com o Desktop rodar o sync. Para importar também fora do PC, a alternativa é um servidor com o Zotero Desktop em headless, o mesmo backend seguro, ainda sem verificação de compatibilidade de arquitetura. O cache de hash e o lock precisariam sair da máquina local.
+Rodar fora do PC ficou como um modo sem importação, que não está agendado: sincronização de pastas e coleções, renomeações, relatório e limpeza de duplicatas só precisam da API do Zotero e da leitura do Drive, e PDFs novos esperariam na fila até o PC rodar o sync. Um servidor com o Zotero Desktop em headless, por exemplo numa VM Oracle, foi avaliado e **descartado** por não compensar o custo de manter outra máquina. Se um dia o modo sem importação for retomado, o cache de hash e o lock precisariam sair da máquina local.
 
 ## Contexto do projeto
 
