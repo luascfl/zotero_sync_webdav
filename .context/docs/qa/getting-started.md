@@ -22,12 +22,6 @@ ZOTERO_API_KEY=...
 ZOTERO_SYNC_TARGET_FOLDER=/path/to/mounted/webdav/folder
 ```
 
-Optional for the Obsidian mirror script:
-
-```env
-OBSIDIAN_ZOTERO_MIRROR_ROOT=/path/to/ObsidianLocal
-```
-
 ## Run commands
 - Validate syntax:
   ```bash
