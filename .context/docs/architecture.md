@@ -30,7 +30,24 @@ The Google Drive directory (`zoterodb`) serves concurrently as the Zotero physic
 - The script enforces Zotero's collection structure onto the Drive directory, organizing PDFs into collection folders.
 - Obsidian reads this identical folder structure natively.
 - Zotero exclusively manages the `.pdf` attachments. Obsidian manages the `.md` notes. The script strictly filters for `.pdf` files, actively ignoring Markdown notes and the `.obsidian` configuration folder, preventing pollution of the Zotero bibliographic database.
-- **Vault Synchronization:** The vault (`zoterodb`) is synced directly to Google Drive via Obsidian's **Remotely Save** plugin. This plugin manages the upload/download of all vault contents (including PDFs placed by the Zotero script and Markdown notes), removing the need for a separate OS-level mount (like Koofr or rclone) for Obsidian sync. Use `obsidian-setup` to configure Obsidian to use `zoterodb` as the vault and set up Remotely Save.
+- **Vault Synchronization:** the script reads and writes `zoterodb` through the rclone mount of the Google Drive remote (`~/Google Drive`). The Obsidian vault is the same physical folder; the **Remotely Save** plugin is registered in the vault configuration, and its exact role in moving Markdown notes was not verified here. `obsidian-setup` registers `zoterodb` as a vault without removing other registered vaults.
+
+## Two file channels
+The design separates how Zotero reads files from how the vault is organized, to keep opening PDFs fast.
+
+| Channel | Used by | Role |
+| --- | --- | --- |
+| Koofr WebDAV, `app.koofr.net/dav/Koofr/zotero` | Zotero Desktop, natively (`sync.storage.protocol = webdav`) | Whole-file delivery of attachments as `KEY.zip` plus `KEY.prop`; avoids on-demand streaming |
+| Google Drive `zoterodb` through the rclone mount | The synchronizer and Obsidian | Folder organization by collection, Markdown notes, backup |
+
+Zotero never reads the Drive; the synchronizer is the bridge. `~/Zotero` is the Zotero data directory (`useDataDir = true`); its `storage/` holds the local copies that make reading fast and that the synchronizer uses as a hash anchor. All attachments are imported files, none are linked. The earlier `Koofr WebDAV GDrive` rclone remote (a Koofr view of the Drive) was obsolete and was removed; it is not the Zotero WebDAV.
+
+## Two-way sync between folders and collections
+The collection key is the identity and `.zotero_folders.json` (key to relative path, written atomically after a clean run) is the memory between runs. `plan_collection_folder_actions` only reads; `apply_collection_folder_actions` renames a Drive directory after a Zotero rename (hash cache re-keyed) or renames a collection in place after a Drive rename. Safeguards: unmounted-drive guard, ledger age limit of 14 days, at most 10 collection deletions per run, audit lines in `duplicate_actions.jsonl`, and `ZOTERO_FOLDER_SYNC_DRY_RUN=1`. Details are in [data-flow](./data-flow.md).
+
+## Planned direction: run outside the local machine
+Not implemented. A hosted run would have to write each new attachment to both channels (the Zotero-format `.zip` and `.prop` in the Koofr WebDAV, and the file in the Drive folder), replace the Desktop recognizer with API-based metadata lookup, and move the lock, hash cache and snapshot out of the machine. Writing the WebDAV format is the highest-risk step and must be validated against a disposable item first.
+
 ## Detected design patterns
 | Pattern | Confidence | Locations | Description |
 | --- | ---: | --- | --- |
