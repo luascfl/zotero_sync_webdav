@@ -81,6 +81,19 @@ Isto ainda não está implementado. Decisão: o sync **não** vai gravar `.zip` 
 
 Rodar fora do PC ficou como um modo sem importação, que não está agendado: sincronização de pastas e coleções, renomeações, relatório e limpeza de duplicatas só precisam da API do Zotero e da leitura do Drive, e PDFs novos esperariam na fila até o PC rodar o sync. Um servidor com o Zotero Desktop em headless, por exemplo numa VM Oracle, foi avaliado e **descartado** por não compensar o custo de manter outra máquina. Se um dia o modo sem importação for retomado, o cache de hash e o lock precisariam sair da máquina local.
 
+## O que roda online, sem risco
+
+O workflow `.github/workflows/library-health.yml` roda toda segunda-feira e sob demanda (aba Actions, "Run workflow"). Ele é **somente leitura e só usa a API do Zotero**: não toca no Drive, não altera a biblioteca e não importa PDFs. O comando equivalente local é `python3 zotero_sync_webdav.py biblioteca-relatorio`.
+
+O relatório mostra contagens da biblioteca e aponta PDFs soltos sem item pai, grupos de itens duplicados, coleções vazias, coleções irmãs com o mesmo nome e itens com a tag de revisão de duplicata. Como o repositório é público, ele traz só **contagens e chaves de itens**, nunca títulos, nomes de arquivo ou nomes de coleção, e há um teste que garante isso.
+
+Para ativar, crie dois secrets em Settings, Secrets and variables, Actions:
+
+- `ZOTERO_LIBRARY_ID`: o número da biblioteca de usuário.
+- `ZOTERO_API_KEY`: uma chave **criada só para isto, com acesso de leitura** em `zotero.org/settings/keys`. Não reutilize a chave do sync, que tem permissão de escrita.
+
+Sem os secrets, o workflow apenas registra no resumo que eles faltam e termina sem erro. O workflow nunca roda em pull request, para os secrets não chegarem a forks.
+
 ## Contexto do projeto
 
 A documentação técnica fica em `.context/docs/`, o plano em `.context/docs/planning_gsd/` e as histórias em `.context/prd_ralph/prd.json`.
