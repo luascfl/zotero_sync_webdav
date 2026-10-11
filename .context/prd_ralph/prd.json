@@ -465,6 +465,22 @@
         "The first-cycle notifications are consumed only when a sync actually ran, and the start notification is sent after the lock is acquired.",
         "Tests cover the surviving loop, the unchanged exit code and the absence of a start notification on collision; the full suite stays green."
       ]
+    },
+    {
+      "id": "US-025",
+      "title": "Online read-only library health check on GitHub Actions",
+      "status": "done",
+      "dependsOn": [
+        "US-024"
+      ],
+      "description": "As the owner, I want the part of the sync that is safe to run online to run on a schedule on GitHub Actions: read-only, API only, no Drive, no writes, no PDF import.",
+      "acceptanceCriteria": [
+        "A biblioteca-relatorio subcommand reports library counts, standalone PDF attachments, duplicate item groups, empty collections, sibling collections with the same core name and items carrying the duplicate-review tag, using only the Zotero API.",
+        "The repository is public, so the report and the log carry only counts and item keys, never titles, filenames or collection names; a test asserts this and a real run was scanned against all real titles, filenames and collection names.",
+        "The mode needs no target folder and does not take the sync lock; an API failure exits 1 and prints only the error type.",
+        "The workflow runs on schedule and on demand only, never on pull_request, with contents: read, secrets scoped to the steps that use them, and pipefail so a failure is not hidden by tee; missing secrets end the run cleanly with a notice.",
+        "The full suite stays green."
+      ]
     }
   ]
 }

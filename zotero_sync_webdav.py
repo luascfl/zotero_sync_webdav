@@ -142,14 +142,17 @@ def load_config() -> None:
 
     _config_loaded = True
 
-def check_environment_requirements() -> None:
-    """Valida a presença das variáveis de ambiente obrigatórias."""
+def check_environment_requirements(require_target: bool = True) -> None:
+    """Valida a presença das variáveis de ambiente obrigatórias.
+
+    `require_target=False` serve aos modos que só falam com a API, como o relatório de saúde
+    da biblioteca no GitHub Actions, que não tem pasta de drive.
+    """
     load_config()
-    missing_env = [name for name, value in {
-        "ZOTERO_LIBRARY_ID": LIBRARY_ID,
-        "ZOTERO_API_KEY": API_KEY,
-        "ZOTERO_SYNC_TARGET_FOLDER": TARGET_FOLDER_RAW,
-    }.items() if not value]
+    required = {"ZOTERO_LIBRARY_ID": LIBRARY_ID, "ZOTERO_API_KEY": API_KEY}
+    if require_target:
+        required["ZOTERO_SYNC_TARGET_FOLDER"] = TARGET_FOLDER_RAW
+    missing_env = [name for name, value in required.items() if not value]
 
     if missing_env:
         raise RuntimeError(
@@ -2000,6 +2003,10 @@ class ZoteroLibraryCache:
         ]
         return self._sorted_copies(found)
 
+    def all_items(self) -> List[dict]:
+        """Todos os itens do snapshot, sem anotações, como cópias independentes."""
+        return self._sorted_copies(list(self.items.values()))
+
     @staticmethod
     def _sorted_copies(items: List[dict]) -> List[dict]:
         # Os chamadores alteram os itens que recebem; cópias impedem que isso vaze para o snapshot.
@@ -2760,12 +2767,141 @@ def run_duplicates_report_mode() -> None:
     print_duplicates_report(groups, bibliographic_groups)
 
 
-def connect_zotero_client() -> zotero.Zotero:
-    """Conecta na API do Zotero usando a configuração ativa."""
-    check_environment_requirements()
+def connect_zotero_client(require_target: bool = True) -> zotero.Zotero:
+    """Conecta na API do Zotero usando a configuração ativa.
+
+    `require_target=False` dispensa a pasta do drive, para modos que só usam a API.
+    """
+    check_environment_requirements(require_target=require_target)
     client = zotero.Zotero(LIBRARY_ID, LIBRARY_TYPE, API_KEY)
     client.key_info()
     return client
+
+
+def build_library_health_report(items: List[dict], collections: List[dict]) -> dict:
+    """Saúde da biblioteca a partir de todos os itens e coleções: só contagens e chaves.
+
+    Nunca devolve títulos, nomes de arquivo nem nomes de coleção. O relatório pode rodar em
+    repositório público (GitHub Actions), onde log e resumo são visíveis a qualquer pessoa;
+    uma chave de item não identifica nada sem acesso à biblioteca.
+    """
+    def data_of(item: dict) -> dict:
+        return item.get('data') or {}
+
+    attachments = [item for item in items if data_of(item).get('itemType') == 'attachment']
+    pdfs = [item for item in attachments if attachment_is_pdf(item)]
+    standalone_pdfs = sorted(item['key'] for item in pdfs if not data_of(item).get('parentItem'))
+    bibliographic = [
+        item for item in items
+        if not data_of(item).get('parentItem')
+        and data_of(item).get('itemType') != 'attachment'
+        and data_of(item).get('title')
+    ]
+    duplicate_groups = [
+        {
+            'kind': group['identity'][0],
+            'auto_removable': bibliographic_group_auto_delete_block_reason(group['identity']) is None,
+            'keys': [entry['key'] for entry in group['items']],
+        }
+        for group in build_bibliographic_duplicate_groups(build_bibliographic_parent_index(bibliographic))
+    ]
+
+    collection_keys = {col['key'] for col in collections if col.get('key')}
+    used_collections = {key for item in items for key in (data_of(item).get('collections') or [])}
+    parent_collections = {
+        (col.get('data') or {}).get('parentCollection') for col in collections
+    } - {None, False, ''}
+    empty_collections = sorted(collection_keys - used_collections - parent_collections)
+
+    siblings: dict[tuple, list[str]] = {}
+    for col in collections:
+        data = col.get('data') or {}
+        core = normalize_duplicate_collection_core_name(data.get('name', ''))
+        if col.get('key') and core:
+            siblings.setdefault((data.get('parentCollection') or None, core), []).append(col['key'])
+
+    return {
+        'counts': {
+            'items': len(items),
+            'bibliographic': len(bibliographic),
+            'attachments': len(attachments),
+            'pdf_attachments': len(pdfs),
+            'collections': len(collection_keys),
+            'unfiled_bibliographic': sum(1 for item in bibliographic if not data_of(item).get('collections')),
+        },
+        'standalone_pdf_attachments': standalone_pdfs,
+        'bibliographic_duplicate_groups': duplicate_groups,
+        'empty_collections': empty_collections,
+        'sibling_duplicate_collections': [sorted(keys) for keys in siblings.values() if len(keys) > 1],
+        'review_tagged_items': sorted(
+            item['key'] for item in items
+            if REVIEW_DUPLICATE_TAG in {tag.get('tag') for tag in (data_of(item).get('tags') or [])}
+        ),
+    }
+
+
+def render_library_health_markdown(report: dict, fetch_mode: str | None = None, max_keys: int = 15) -> str:
+    """Markdown do relatório de saúde, pronto para o resumo do GitHub Actions."""
+    counts = report['counts']
+
+    def keys_cell(groups: list) -> str:
+        flat = ['+'.join(group) if isinstance(group, list) else group for group in groups]
+        shown = ', '.join(f'`{value}`' for value in flat[:max_keys])
+        return shown + (f' e mais {len(flat) - max_keys}' if len(flat) > max_keys else '') if flat else '-'
+
+    duplicate_keys = [group['keys'] for group in report['bibliographic_duplicate_groups']]
+    checks = [
+        ('PDFs soltos, sem item pai', report['standalone_pdf_attachments']),
+        ('Grupos de itens duplicados por DOI ou título', duplicate_keys),
+        ('Coleções vazias, sem subcoleções', report['empty_collections']),
+        ('Coleções irmãs com o mesmo nome-núcleo', report['sibling_duplicate_collections']),
+        ('Itens com a tag de revisão de duplicata', report['review_tagged_items']),
+    ]
+    lines = [
+        '## Saúde da biblioteca Zotero',
+        '',
+        'Somente leitura, pela API. O relatório traz apenas contagens e chaves de itens, '
+        'nunca títulos, nomes de arquivo ou nomes de coleção.',
+        '',
+        '| Biblioteca | Quantidade |',
+        '|---|---:|',
+        f"| Itens, sem anotações | {counts['items']} |",
+        f"| Itens bibliográficos | {counts['bibliographic']} |",
+        f"| Anexos | {counts['attachments']} |",
+        f"| Anexos PDF | {counts['pdf_attachments']} |",
+        f"| Coleções | {counts['collections']} |",
+        f"| Itens bibliográficos fora de qualquer coleção | {counts['unfiled_bibliographic']} |",
+        '',
+    ]
+    findings = [(label, values) for label, values in checks if values]
+    if findings:
+        lines += ['### Pontos de atenção', '', '| Verificação | Quantidade | Chaves |', '|---|---:|---|']
+        lines += [f'| {label} | {len(values)} | {keys_cell(values)} |' for label, values in findings]
+    else:
+        lines += ['### Pontos de atenção', '', 'Nenhum.']
+    if fetch_mode:
+        lines += ['', f'Modo de leitura da biblioteca: {fetch_mode}.']
+    return '\n'.join(lines) + '\n'
+
+
+def run_library_health_mode() -> None:
+    """Relatório de saúde da biblioteca: somente leitura e só pela API do Zotero.
+
+    Não usa o drive, o storage local nem o lock do sync, então pode rodar em qualquer lugar,
+    como no GitHub Actions. Só avisos e erros chegam ao log, e o relatório não leva títulos.
+    """
+    logging.getLogger().setLevel(logging.WARNING)
+    try:
+        zot = connect_zotero_client(require_target=False)
+        cache = get_library_cache(zot)
+        cache.refresh()
+        report = build_library_health_report(cache.all_items(), fetch_zotero_collections(zot))
+    except Exception as exc:
+        # Só o tipo do erro: a mensagem pode ecoar detalhes da requisição num log público.
+        print(f"## Saúde da biblioteca Zotero\n\nFalha ao consultar a API do Zotero: {type(exc).__name__}.")
+        raise SystemExit(1)
+    print(render_library_health_markdown(report, fetch_mode=cache.last_mode))
+
 
 def run_diagnostic_mode() -> None:
     check_environment_requirements()
@@ -7825,6 +7961,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help='Relatório somente leitura de PDFs duplicados por conteúdo e itens duplicados',
     )
 
+    subparsers.add_parser(
+        'biblioteca-relatorio',
+        help='Relatório de saúde da biblioteca: somente leitura, só pela API, sem títulos',
+    )
+
 
     obsidian_verify_parser = subparsers.add_parser(
         'obsidian-verify',
@@ -9152,6 +9293,9 @@ def main(argv: List[str] | None = None) -> int:
         return
     if args.command == 'duplicatas-relatorio':
         run_duplicates_report_mode()
+        return 0
+    if args.command == 'biblioteca-relatorio':
+        run_library_health_mode()
         return 0
     if args.command == 'setup-autostart':
         run_setup_autostart_mode(args.setup_args)

@@ -1,0 +1,66 @@
+name: library-health
+
+# Relatório de saúde da biblioteca do Zotero. Somente leitura e só pela API: não usa o Drive,
+# não altera a biblioteca e não importa PDFs. O repositório é público, então o relatório traz
+# apenas contagens e chaves de itens, nunca títulos, nomes de arquivo ou nomes de coleção.
+#
+# Secrets do repositório (Settings > Secrets and variables > Actions):
+#   ZOTERO_LIBRARY_ID  número da biblioteca de usuário
+#   ZOTERO_API_KEY     chave criada só para isto, com acesso de LEITURA à biblioteca
+#
+# Dispara só por agendamento e à mão. Nunca em pull request, para os secrets não chegarem a forks.
+on:
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: library-health
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Os secrets ficam só nos passos que os usam, longe das actions de terceiros.
+      - name: Conferir os secrets
+        id: secrets
+        shell: bash
+        env:
+          ZOTERO_LIBRARY_ID: ${{ secrets.ZOTERO_LIBRARY_ID }}
+          ZOTERO_API_KEY: ${{ secrets.ZOTERO_API_KEY }}
+        run: |
+          if [ -z "$ZOTERO_LIBRARY_ID" ] || [ -z "$ZOTERO_API_KEY" ]; then
+            {
+              echo "## Saúde da biblioteca Zotero"
+              echo
+              echo "Secrets ausentes. Crie \`ZOTERO_LIBRARY_ID\` e \`ZOTERO_API_KEY\` (chave só de leitura) em"
+              echo "Settings > Secrets and variables > Actions. Nada foi consultado."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.secrets.outputs.present == 'true'
+      - uses: actions/setup-python@v5
+        if: steps.secrets.outputs.present == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependências
+        if: steps.secrets.outputs.present == 'true'
+        run: pip install -r requirements.txt
+      - name: Gerar o relatório
+        if: steps.secrets.outputs.present == 'true'
+        # shell: bash liga o pipefail; sem ele uma falha do Python ficaria escondida pelo tee.
+        shell: bash
+        env:
+          ZOTERO_LIBRARY_ID: ${{ secrets.ZOTERO_LIBRARY_ID }}
+          ZOTERO_API_KEY: ${{ secrets.ZOTERO_API_KEY }}
+          ZOTERO_LIBRARY_TYPE: user
+        run: python zotero_sync_webdav.py biblioteca-relatorio | tee -a "$GITHUB_STEP_SUMMARY"
