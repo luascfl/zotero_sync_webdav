@@ -356,6 +356,21 @@
         "The unified Drive root is added only when absent.",
         "Focused tests cover preservation and idempotent registration without modifying a real Obsidian configuration."
       ]
+    },
+    {
+      "id": "US-018",
+      "title": "Validate unified vault setup dry-run",
+      "status": "done",
+      "dependsOn": [
+        "US-017"
+      ],
+      "description": "As an operator, I want a dry-run against an exported local Obsidian bundle to prove setup preserves current vault registrations without copying PDFs.",
+      "acceptanceCriteria": [
+        "A temporary export of the current Deb Obsidian configuration succeeds.",
+        "obsidian-setup --dry-run completes against that bundle.",
+        "The observed output preserves the unified Drive vault and unrelated registered vaults.",
+        "The temporary export is removed after validation."
+      ]
     }
   ]
 }

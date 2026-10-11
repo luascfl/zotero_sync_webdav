@@ -5940,13 +5940,14 @@ def run_obsidian_apply_mode(args: argparse.Namespace) -> None:
 
 def run_obsidian_mirror_mode(args: argparse.Namespace) -> None:
     apply_changes = args.apply and not args.dry_run
-    target_root = resolve_unified_vault_root()
     obsidian_log("Conectando ao Zotero para espelhar coleções no vault unificado...")
     zot = connect_zotero_client()
+    target_root = resolve_unified_vault_root()
     mirror_zotero_collections_to_obsidian(zot, target_root, apply_changes)
 
 
 def run_obsidian_setup_mode(args: argparse.Namespace) -> None:
+    load_config()
     dry_run = args.dry_run or not args.apply
     apply_args = argparse.Namespace(
         target=args.target,
