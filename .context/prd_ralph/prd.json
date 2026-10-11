@@ -497,6 +497,21 @@
         "A changed file still ignores its quarantine; tests cover expiry, legacy entries, scaling, the breaker and the stamp.",
         "A real retry of quarantined files succeeds."
       ]
+    },
+    {
+      "id": "US-027",
+      "title": "Isolate the test suite from the real environment",
+      "status": "done",
+      "dependsOn": [
+        "US-026"
+      ],
+      "description": "As the owner, I want running the tests to leave my real log, hash cache, audit trail and desktop untouched.",
+      "acceptanceCriteria": [
+        "tests/test_000_isolation.py loads first and points HOME at a throwaway directory, puts stub notify-send, dunstify and xdg-open first on PATH and clears ZOTERO_* and ZSW_* variables before zotero_sync_webdav is imported.",
+        "A guard test fails if the module paths are not under the throwaway HOME.",
+        "Measured on the real environment: log lines, hash cache mtime, audit file size and dunst history are unchanged by a full run.",
+        "The suite also passes in a clean CI-like environment."
+      ]
     }
   ]
 }

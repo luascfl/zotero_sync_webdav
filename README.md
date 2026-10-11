@@ -75,6 +75,8 @@ python3 -m unittest discover -s tests
 
 O GitHub Actions roda a mesma suíte a cada push, em `.github/workflows/tests.yml`.
 
+A suíte inteira roda isolada do seu ambiente: o primeiro módulo carregado (`tests/test_000_isolation.py`) usa um HOME descartável e notificadores falsos, então ela não toca no log, no cache de hash nem na auditoria reais e não abre notificações. Rodar um arquivo sozinho (`python3 -m unittest tests.test_x`) não carrega esse isolamento.
+
 ## Direção planejada: rodar fora do PC
 
 Isto ainda não está implementado. Decisão: o sync **não** vai gravar `.zip` e `.prop` direto no WebDAV do Koofr. Um arquivo fora do padrão faria o Zotero marcar o anexo como corrompido, e o risco não compensa. A importação de PDFs continua exclusiva do Zotero Desktop, pelo recognizer, que é o caminho oficial.
