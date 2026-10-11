@@ -371,6 +371,21 @@
         "The observed output preserves the unified Drive vault and unrelated registered vaults.",
         "The temporary export is removed after validation."
       ]
+    },
+    {
+      "id": "US-019",
+      "title": "Cover obsidian-setup with an isolated integration test",
+      "status": "done",
+      "dependsOn": [
+        "US-018"
+      ],
+      "description": "As a maintainer, I want run_obsidian_setup_mode exercised with temporary app and bundle directories so config loading, vault preservation and mirror targeting cannot regress silently.",
+      "acceptanceCriteria": [
+        "The test loads the configured vault root before applying and mirroring.",
+        "An existing unrelated vault registration survives an apply and the unified root is registered.",
+        "The mirror receives the unified root and no real Obsidian config, Drive or Zotero API is touched.",
+        "The focused test passes."
+      ]
     }
   ]
 }

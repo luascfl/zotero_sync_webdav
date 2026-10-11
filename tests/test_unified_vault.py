@@ -52,6 +52,50 @@ class UnifiedVaultTopologyTests(unittest.TestCase):
             self.assertFalse(added_again)
             self.assertEqual(unchanged, merged)
 
+    def test_setup_mode_applies_bundle_then_mirrors_unified_root(self):
+        import argparse
+        import json
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            app_dir = base / "app"
+            vault_root = base / "zoterodb"
+            other_vault = base / "other"
+            for path in (app_dir, vault_root / ".obsidian", other_vault / ".obsidian"):
+                path.mkdir(parents=True)
+            (app_dir / "obsidian.json").write_text(
+                json.dumps({"vaults": {"OTHER": {"path": str(other_vault)}}}),
+                encoding="utf-8",
+            )
+            bundle = base / "bundle"
+            (bundle / "app").mkdir(parents=True)
+            (bundle / "vaults" / "OTHER" / ".obsidian").mkdir(parents=True)
+            (bundle / "app" / "obsidian.json").write_text(
+                json.dumps({"vaults": {"OTHER": {"path": str(other_vault)}}}),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                target="deb", app_dir=str(app_dir), bundle=str(bundle), map=None,
+                create_missing_vaults=False, dry_run=False, apply=True,
+            )
+            original_target = zsync.TARGET_FOLDER
+            zsync.TARGET_FOLDER = str(vault_root)
+            try:
+                with mock.patch.object(zsync, "load_config") as load_config, \
+                        mock.patch.object(zsync, "connect_zotero_client", return_value=object()), \
+                        mock.patch.object(zsync, "mirror_zotero_collections_to_obsidian") as mirror:
+                    zsync.run_obsidian_setup_mode(args)
+            finally:
+                zsync.TARGET_FOLDER = original_target
+
+            load_config.assert_called_once()
+            self.assertEqual(mirror.call_args.args[1], vault_root.resolve())
+            self.assertTrue(mirror.call_args.args[2])
+            registered = json.loads((app_dir / "obsidian.json").read_text(encoding="utf-8"))["vaults"]
+            paths = {entry["path"] for entry in registered.values()}
+            self.assertEqual(paths, {str(other_vault), str(vault_root.resolve())})
+
     def test_collection_directories_are_created_once_in_unified_root(self):
         collections = [
             {"key": "ROOT", "data": {"name": "Curso"}},

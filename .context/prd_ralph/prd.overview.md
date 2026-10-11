@@ -1,7 +1,7 @@
 # PRD Overview: Zotero WebDAV sync hardening
 
 - File: .context/prd_ralph/prd.json
-- Stories: 18 total (1 open, 0 in_progress, 17 done)
+- Stories: 19 total (1 open, 0 in_progress, 18 done)
 
 ## Quality Gates
 - python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
@@ -26,3 +26,4 @@
 - [done] US-016: Classify in-place PDFs by unified collection path (depends on: US-015)
 - [done] US-017: Preserve vault registrations during Obsidian setup (depends on: US-015)
 - [done] US-018: Validate unified vault setup dry-run (depends on: US-017)
+- [done] US-019: Cover obsidian-setup with an isolated integration test (depends on: US-018)
