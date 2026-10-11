@@ -1,7 +1,7 @@
 # PRD Overview: Zotero WebDAV sync hardening
 
 - File: .context/prd_ralph/prd.json
-- Stories: 27 total (1 open, 0 in_progress, 26 done)
+- Stories: 28 total (1 open, 0 in_progress, 27 done)
 
 ## Quality Gates
 - python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
@@ -35,3 +35,4 @@
 - [done] US-025: Online read-only library health check on GitHub Actions (depends on: US-024)
 - [done] US-026: Hash timeout quarantine expires and scales with file size (depends on: US-025)
 - [done] US-027: Isolate the test suite from the real environment (depends on: US-026)
+- [done] US-028: Unified coded event log with error codes, run ids and pending outcomes (depends on: US-027)

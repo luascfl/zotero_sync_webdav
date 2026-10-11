@@ -512,6 +512,25 @@
         "Measured on the real environment: log lines, hash cache mtime, audit file size and dunst history are unchanged by a full run.",
         "The suite also passes in a clean CI-like environment."
       ]
+    },
+    {
+      "id": "US-028",
+      "title": "Unified coded event log with error codes, run ids and pending outcomes",
+      "status": "done",
+      "dependsOn": [
+        "US-027"
+      ],
+      "description": "As the owner, I want every relevant failure or pending item to carry a stable code, a run id and a place in one queryable log, and I want skipped work to count, so a run that skips files is not reported as clean.",
+      "acceptanceCriteria": [
+        "ERROR_CATALOG defines ZSW-AREA-NNN codes with severity error, pending or warning, a title, a probable cause and an action; a test fails if a code used in the source is missing from the catalog.",
+        "log_event writes the readable log line with the run_id and a structured events-YYYY-MM-DD.jsonl row; the same subject counts once per run.",
+        "Errors with a code add to the Erros count and the exit code; pendings are counted separately and shown in the final report, the popup and the panel snapshot.",
+        "A first hash timeout of a file is a pending; the same unchanged file timing out again after the quarantine is an error; a changed file or a successful read starts over.",
+        "explicar [codigo] prints the catalog or the cause and action; eventos filters by code, run (ultimo) and days.",
+        "The daily log is archived at the day change instead of overwritten and purged after 14 days (ZOTERO_LOG_RETENTION_DAYS).",
+        "A sync that exits with errors no longer kills the watcher loop.",
+        "Tests cover each rule, mutations were checked, and a real full sync ran."
+      ]
     }
   ]
 }

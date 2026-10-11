@@ -67,6 +67,27 @@ ZOTERO_FOLDER_SYNC_DRY_RUN=1 python3 zotero_sync_webdav.py sync
 
 A configuração fica em `~/.config/zotero_sync_webdav/zotero_sync.env`: `ZOTERO_LIBRARY_ID`, `ZOTERO_LIBRARY_TYPE`, `ZOTERO_API_KEY` e `ZOTERO_SYNC_TARGET_FOLDER`. Nunca commite esse arquivo.
 
+## Log, códigos de erro e depuração
+
+Cada falha ou pendência relevante tem um código estável no formato `ZSW-ÁREA-NNN`, definido em `ERROR_CATALOG` no código. Três gravidades:
+
+| Gravidade | Significa | Conta como erro |
+|---|---|---|
+| `error` | Falha que torna o run ruim | Sim, entra em `Erros` e muda o código de saída |
+| `pending` | Algo ficou sem fazer e será tentado de novo | Não, mas aparece como `Pendências` na notificação e no painel |
+| `warning` | Situação esperada ou informativa | Não |
+
+Todo evento vai para o log legível do dia (`~/.cache/zotero_sync_webdav/logs/zotero_sync_today.log`, com o `run_id` de 8 caracteres em cada linha) e para um arquivo estruturado, `events-AAAA-MM-DD.jsonl`, na mesma pasta. O relatório final do sync traz um bloco com os códigos do run.
+
+```bash
+python3 zotero_sync_webdav.py explicar                    # lista o catálogo
+python3 zotero_sync_webdav.py explicar ZSW-HASH-001       # causa provável e ação
+python3 zotero_sync_webdav.py eventos --run ultimo        # tudo que aconteceu no último sync
+python3 zotero_sync_webdav.py eventos --codigo ZSW-HASH-001 --dias 7
+```
+
+O mesmo assunto (por exemplo um caminho) conta uma vez por run, então 30 PDFs presos aparecem como 30 eventos, não como centenas de linhas repetidas. O log do dia é arquivado como `zotero_sync_AAAA-MM-DD.log` na virada e apagado depois de 14 dias (`ZOTERO_LOG_RETENTION_DAYS`).
+
 ## Testes
 
 ```bash

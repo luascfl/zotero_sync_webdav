@@ -46,6 +46,7 @@ class SyncStatusTests(unittest.TestCase):
                 "duplicateGroups": 4,
                 "duplicateReview": 3,
                 "pendingImports": 1,
+                "pending": 0,
             },
         )
         self.assertEqual(snapshot["lastError"], "Falha ao importar pending.pdf")

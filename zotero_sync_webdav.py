@@ -495,6 +495,288 @@ def probe_pdf_content_read(
     return True
 
 
+# --- Eventos com código, run_id e log unificado ----------------------------------------
+#
+# Cada falha ou pendência relevante tem um código estável (ZSW-<ÁREA>-<NNN>) descrito em
+# ERROR_CATALOG. `log_event` escreve a linha legível no log do dia e uma linha estruturada em
+# events-AAAA-MM-DD.jsonl, ambas com o run_id do sync, e conta o evento para o relatório final,
+# a notificação e o código de saída. Severidades:
+#   error   falha que torna o run ruim e entra em `Erros`;
+#   pending algo ficou sem fazer e será tentado de novo; não é erro, mas o run não fica "limpo";
+#   warning situação esperada ou informativa.
+
+ERROR_CATALOG: dict[str, dict] = {
+    "ZSW-HASH-001": {
+        "severity": "error",
+        "title": "Timeout ao calcular o SHA-256 de um PDF",
+        "cause": "A leitura do arquivo pelo mount do rclone passou do limite. A primeira vez é pendência: "
+                 "pode ser um tropeço do mount, e a leitura seguinte sai do cache do rclone. Vira erro quando "
+                 "o mesmo arquivo estoura de novo depois da quarentena.",
+        "action": "Se for a primeira vez, nada a fazer: o arquivo é tentado de novo. Se virou erro, confira o "
+                  "mount (systemctl --user status rclone-google-drive) ou aumente ZOTERO_HASH_TIMEOUT_MAX_SECONDS.",
+    },
+    "ZSW-HASH-002": {
+        "severity": "pending",
+        "title": "PDF pulado porque está na quarentena de timeout",
+        "cause": "O arquivo estourou o tempo de leitura há pouco e ainda está dentro das "
+                 "ZOTERO_HASH_QUARANTINE_TTL_HOURS horas de espera. Não entra na reconciliação neste run.",
+        "action": "Aguarde a próxima tentativa. Enquanto houver pendências desse tipo, o run não é limpo.",
+    },
+    "ZSW-HASH-003": {
+        "severity": "pending",
+        "title": "Não foi possível ler o arquivo para calcular o hash",
+        "cause": "Erro de E/S ao abrir ou ler o PDF (arquivo removido durante o run, permissão ou mount com falha).",
+        "action": "Confira se o arquivo existe e se o mount está saudável; o próximo run tenta de novo.",
+    },
+    "ZSW-DESK-001": {
+        "severity": "error",
+        "title": "Falha ao importar o PDF pelo Zotero Desktop",
+        "cause": "O plugin recognizer não respondeu ou recusou a importação.",
+        "action": "Confira se o Zotero está aberto ou em headless e se o plugin responde em "
+                  "http://127.0.0.1:23119/zoteroSyncRecognize/ping.",
+    },
+    "ZSW-SYS-001": {
+        "severity": "warning",
+        "title": "Outro sync já está em execução",
+        "cause": "O lock do sync está ocupado, em geral pelo timer de 2 horas enquanto o watcher tenta rodar.",
+        "action": "Nenhuma. É esperado; o ciclo é adiado.",
+    },
+    "ZSW-SYS-002": {
+        "severity": "error",
+        "title": "Pré-requisito do sync indisponível",
+        "cause": "O preflight falhou: configuração ausente, pasta do drive fora do ar ou storage local sem escrita.",
+        "action": "Leia a mensagem do preflight no log. Se o drive estiver desmontado, "
+                  "systemctl --user restart rclone-google-drive.",
+    },
+    "ZSW-SYS-003": {
+        "severity": "warning",
+        "title": "Sync terminou com erro dentro do watcher",
+        "cause": "O sync encerrou com código diferente de zero (erros ou pré-requisito). O watcher segue vivo.",
+        "action": "Veja os eventos do mesmo run com: zotero_sync_webdav.py eventos --run ultimo.",
+    },
+    "ZSW-FOLD-001": {
+        "severity": "pending",
+        "title": "Conflito entre pasta do drive e coleção do Zotero",
+        "cause": "Renomear tocaria numa pasta de destino que já tem conteúdo, ou o par pasta e coleção é ambíguo.",
+        "action": "Decida qual pasta vale e mova os arquivos à mão; nada foi sobrescrito.",
+    },
+    "ZSW-FOLD-003": {
+        "severity": "error",
+        "title": "Drive parece desmontado: sync de pastas bloqueado",
+        "cause": "Nenhuma pasta do livro-razão existe no drive. Agir agora apagaria coleções à toa.",
+        "action": "Monte o drive (systemctl --user restart rclone-google-drive) e rode de novo.",
+    },
+    "ZSW-COLL-001": {
+        "severity": "pending",
+        "title": "Não foi possível alinhar a coleção de um item ao drive",
+        "cause": "A API recusou a atualização do item (versão antiga, chave inválida ou rede).",
+        "action": "O próximo run tenta de novo. Se repetir para o mesmo item, abra-o no Zotero.",
+    },
+    "ZSW-COLL-002": {
+        "severity": "pending",
+        "title": "A API recusou apagar uma coleção vazia",
+        "cause": "A coleção mudou desde a leitura ou a versão enviada está desatualizada.",
+        "action": "O próximo run lê a versão atual e tenta de novo.",
+    },
+}
+_SEVERITY_LEVEL = {"error": logging.ERROR, "pending": logging.WARNING, "warning": logging.WARNING}
+_SEVERITY_ORDER = {"error": 0, "pending": 1, "warning": 2}
+LOG_RETENTION_DAYS = max(1, get_env_int("ZOTERO_LOG_RETENTION_DAYS", 14))
+EVENTS_FILE_PREFIX = "events-"
+HASH_TIMEOUT_ERROR_AFTER = 2  # falha do mesmo arquivo que vira erro; a primeira é pendência
+
+
+class RunEvents:
+    """Contagem dos eventos com código do run atual e identificador do run."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.run_id = os.urandom(4).hex()
+        self.counts: dict[str, int] = {}
+        self.in_stats: dict[str, int] = {}
+        self.by_severity: dict[tuple[str, str], int] = {}
+        self.in_stats_by_severity: dict[tuple[str, str], int] = {}
+        self._seen: set[tuple] = set()
+
+    def record(self, code: str, subject: str | None = None, in_stats: bool = False,
+               severity: str | None = None) -> bool:
+        """Conta o evento. Com `subject`, o mesmo assunto conta uma vez por run."""
+        severity = severity or ERROR_CATALOG[code]["severity"]
+        if subject is not None:
+            key = (code, subject)
+            if key in self._seen:
+                return False
+            self._seen.add(key)
+        self.counts[code] = self.counts.get(code, 0) + 1
+        self.by_severity[(code, severity)] = self.by_severity.get((code, severity), 0) + 1
+        if in_stats:
+            self.in_stats[code] = self.in_stats.get(code, 0) + 1
+            self.in_stats_by_severity[(code, severity)] = self.in_stats_by_severity.get((code, severity), 0) + 1
+        return True
+
+    def total(self, severity: str, only_uncounted: bool = False) -> int:
+        """Eventos do run com a gravidade efetiva; `only_uncounted` desconta os já somados em stats."""
+        total = 0
+        for (code, sev), n in self.by_severity.items():
+            if sev != severity:
+                continue
+            total += n
+            if only_uncounted:
+                total -= self.in_stats_by_severity.get((code, sev), 0)
+        return total
+
+
+RUN = RunEvents()
+
+
+class _RunIdFilter(logging.Filter):
+    """Põe o run_id em toda linha do log, inclusive de bibliotecas."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.run_id = RUN.run_id
+        return True
+
+
+def events_file_path(day: str | None = None) -> str:
+    return os.path.join(LOG_DIR, f"{EVENTS_FILE_PREFIX}{day or datetime.now().strftime('%Y-%m-%d')}.jsonl")
+
+
+def log_event(
+    code: str,
+    message: str,
+    *args,
+    subject: str | None = None,
+    in_stats: bool = False,
+    **fields,
+) -> None:
+    """Registra um evento com código no log legível e no log estruturado.
+
+    `subject` agrupa repetições do mesmo assunto (por exemplo um caminho) numa só ocorrência por
+    run. `in_stats=True` avisa que o chamador já soma o evento em stats['errors'], para o fim do
+    run não contá-lo duas vezes. Um código fora do catálogo é um erro de programação (KeyError).
+    """
+    entry = ERROR_CATALOG[code]
+    severity = fields.pop("severity", None) or entry["severity"]
+    if not RUN.record(code, subject, in_stats=in_stats, severity=severity):
+        return
+    text = message % args if args else message
+    logging.log(_SEVERITY_LEVEL[severity], "[%s] %s", code, text)
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "run_id": RUN.run_id,
+        "level": logging.getLevelName(_SEVERITY_LEVEL[severity]),
+        "severity": severity,
+        "code": code,
+        "area": code.split("-")[1].lower(),
+        "message": text,
+        **fields,
+    }
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(events_file_path(), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logging.debug("[LOG] Não foi possível gravar o evento estruturado: %s", exc)
+
+
+def apply_run_events_to_stats(stats: dict) -> None:
+    """Soma os eventos com código ao resultado do run, uma única vez por run."""
+    if stats.get("_events_applied"):
+        return
+    stats["_events_applied"] = True
+    coded_errors = RUN.total("error", only_uncounted=True)
+    stats["coded_errors"] = coded_errors
+    stats["errors"] = int(stats.get("errors", 0) or 0) + coded_errors
+    stats["pending"] = RUN.total("pending")
+    stats["event_counts"] = dict(RUN.counts)
+    stats["run_id"] = RUN.run_id
+
+
+def render_run_events_summary() -> str:
+    """Bloco do relatório final com os eventos com código do run, por gravidade."""
+    if not RUN.counts:
+        return ""
+    lines = ["", f"Eventos com código (run {RUN.run_id}):"]
+    for code in sorted(RUN.counts, key=lambda c: (_SEVERITY_ORDER[ERROR_CATALOG[c]["severity"]], c)):
+        entry = ERROR_CATALOG[code]
+        lines.append(f"- {code} x{RUN.counts[code]} [{entry['severity']}] {entry['title']}")
+    lines.append("Causa e ação: python3 zotero_sync_webdav.py explicar <código>")
+    return "\n".join(lines)
+
+
+def purge_old_logs(retention_days: int = LOG_RETENTION_DAYS, today: datetime | None = None) -> int:
+    """Apaga logs diários e arquivos de eventos mais antigos que a retenção."""
+    if not os.path.isdir(LOG_DIR):
+        return 0
+    cutoff = (today or datetime.now()).date() - timedelta(days=retention_days)
+    pattern = re.compile(rf"(?:zotero_sync_|{re.escape(EVENTS_FILE_PREFIX)})(\d{{4}}-\d{{2}}-\d{{2}})\.(?:log|jsonl)")
+    removed = 0
+    for name in os.listdir(LOG_DIR):
+        match = pattern.fullmatch(name)
+        if not match:
+            continue
+        try:
+            day = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if day >= cutoff:
+            continue
+        try:
+            os.remove(os.path.join(LOG_DIR, name))
+            removed += 1
+        except OSError as exc:
+            logging.warning("[LOG] Não foi possível expirar '%s': %s", name, exc)
+    return removed
+
+
+def run_explain_mode(code: str | None) -> None:
+    """Imprime a causa e a ação de um código, ou o catálogo inteiro sem argumento."""
+    if not code:
+        print("Catálogo de códigos (use: explicar <código>)\n")
+        for known in sorted(ERROR_CATALOG, key=lambda c: (_SEVERITY_ORDER[ERROR_CATALOG[c]["severity"]], c)):
+            entry = ERROR_CATALOG[known]
+            print(f"{known}  [{entry['severity']}]  {entry['title']}")
+        return
+    entry = ERROR_CATALOG.get(code.upper())
+    if not entry:
+        print(f"Código desconhecido: {code}. Rode 'explicar' sem argumento para ver o catálogo.")
+        raise SystemExit(1)
+    print(f"{code.upper()}  [{entry['severity']}]\n{entry['title']}\n")
+    print(f"Causa: {entry['cause']}\n")
+    print(f"Ação: {entry['action']}")
+
+
+def run_events_mode(code: str | None, run: str | None, days: int, limit: int) -> None:
+    """Consulta o log estruturado por código, por run ('ultimo' para o mais recente) e período."""
+    today = datetime.now().date()
+    files = []
+    for offset in range(max(1, days)):
+        path = events_file_path((today - timedelta(days=offset)).strftime("%Y-%m-%d"))
+        if os.path.exists(path):
+            files.append(path)
+    rows: list[dict] = []
+    for path in reversed(files):  # do mais antigo ao mais novo
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+    if run == "ultimo" and rows:
+        run = rows[-1]["run_id"]
+    selected = [
+        row for row in rows
+        if (not code or row.get("code") == code.upper()) and (not run or row.get("run_id") == run)
+    ]
+    for row in selected[-limit:]:
+        print(f"{row['ts'][:19]} {row['run_id']} {row['severity']:<7} {row['code']} {row['message']}")
+    shown = min(len(selected), limit)
+    footer = f"-- {len(selected)} evento(s)" + (f", run {run}" if run else "")
+    print(footer + (f" (mostrando os últimos {shown})" if shown < len(selected) else ""))
+
+
 def prepare_daily_log_file() -> str | None:
     """Garante um log diário único e retorna o caminho."""
     try:
@@ -515,6 +797,15 @@ def prepare_daily_log_file() -> str | None:
         pass
 
     log_path = os.path.join(LOG_DIR, LOG_FILE_NAME)
+    if needs_reset and os.path.exists(log_path):
+        # O log do dia anterior vira zotero_sync_AAAA-MM-DD.log em vez de ser sobrescrito; purge_old_logs
+        # o apaga depois de LOG_RETENTION_DAYS. Uma falha da madrugada continua legível no dia seguinte.
+        try:
+            previous_day = Path(LOG_DATE_FILE).read_text(encoding="utf-8").strip()
+            datetime.strptime(previous_day, "%Y-%m-%d")
+            os.replace(log_path, os.path.join(LOG_DIR, f"zotero_sync_{previous_day}.log"))
+        except (OSError, ValueError):
+            pass  # sem data confiável, mantém o comportamento antigo: o arquivo é recriado
     mode = "w" if needs_reset else "a"
     try:
         with open(log_path, mode, encoding="utf-8") as fh:
@@ -538,10 +829,12 @@ if LOG_FILE_PATH:
         handlers.append(file_handler)
     except OSError as exc:
         print(f"[LOG] Não foi possível anexar handler de arquivo: {exc}")
+for _handler in handlers:
+    _handler.addFilter(_RunIdFilter())
 
 logging.basicConfig(
     level=logging.DEBUG if DEBUG_DETAILED else logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(run_id)s - %(message)s',
     handlers=handlers,
 )
 
@@ -793,6 +1086,7 @@ def build_sync_status_snapshot(
             "duplicateGroups": int(stats.get("bibliographic_duplicate_groups", 0) or 0),
             "duplicateReview": review_count,
             "pendingImports": len(stats.get("pending_desktop_imports", [])),
+            "pending": int(stats.get("pending", 0) or 0),
         },
     }
     if stats.get("last_error"):
@@ -837,6 +1131,8 @@ def build_completion_notification_body(stats: dict, log_path: str | None) -> str
     ]
     if stats.get('errors', 0) > 0:
         body_parts.append(f"Erros: {stats.get('errors', 0)}")
+    if int(stats.get('pending', 0) or 0) > 0:
+        body_parts.append(f"Pendências: {stats.get('pending', 0)}")
     pending_count = len(stats.get('pending_desktop_imports', []))
     if pending_count > 0:
         body_parts.append(f"Fila: {pending_count}")
@@ -4412,7 +4708,9 @@ def get_cached_hash(path: str, cache: Dict[str, dict], stat_result: os.stat_resu
 
     cached = entry.get("hash")
     if cached == HASH_TIMEOUT_QUARANTINE_MARK and hash_quarantine_expired(entry):
-        return None  # Quarentena vencida: o arquivo volta a ser tentado.
+        # Quarentena vencida: o arquivo volta a ser tentado. O contador de falhas acompanha a mesma
+        # entrada (mesmo tamanho e data); se o arquivo mudar, a entrada inteira deixa de valer.
+        return None
     return cached
 
 
@@ -4422,6 +4720,7 @@ def set_cached_hash(
     cache: Dict[str, dict],
     stat_result: os.stat_result | None = None,
     quarantined_at: float | None = None,
+    timeout_count: int = 0,
 ) -> None:
     """Armazena no cache o hash calculado para um arquivo."""
     abspath = _normalize_cache_path(path)
@@ -4440,6 +4739,8 @@ def set_cached_hash(
         entry["mtime"] = stat.st_mtime
     if quarantined_at is not None:
         entry["quarantined_at"] = quarantined_at
+    if timeout_count:
+        entry["timeout_count"] = timeout_count
     cache[abspath] = entry
 
 
@@ -4680,7 +4981,7 @@ def compute_sha256(
     if cache_ref is not None:
         cached = get_cached_hash(abspath, cache_ref, stat)
         if cached == HASH_TIMEOUT_QUARANTINE_MARK:
-            logging.warning("[HASH] Arquivo ignorado (quarentena de timeout recente): '%s'.", path)
+            log_event("ZSW-HASH-002", "Arquivo ignorado (quarentena de timeout recente): '%s'.", path, subject=path)
             return None
         if cached:
             logging.debug("[HASH] Cache hit para '%s'.", path)
@@ -4721,19 +5022,36 @@ def compute_sha256(
         logging.info("[HASH] SHA-256 concluído para '%s' em %.1fs.", path, elapsed)
     except TimeoutError:
         _HASH_RUN_STATE["timeouts"] += 1
-        logging.error(
-            "[HASH] Timeout após %ss ao calcular SHA-256 de '%s' (%.1f MiB). Em quarentena por %dh; "
+        previous_entry = cache_ref.get(abspath, {}) if cache_ref is not None else {}
+        same_file = (
+            previous_entry.get("size") == stat.st_size
+            and previous_entry.get("mtime_ns") == getattr(stat, "st_mtime_ns", None)
+        )
+        # O histórico de falhas só vale para o mesmo arquivo: se o tamanho ou a data mudaram, é recomeço.
+        timeout_count = (int(previous_entry.get("timeout_count", 0) or 0) if same_file else 0) + 1
+        # A primeira falha de um arquivo é pendência (pode ser um tropeço do mount, e a quarentena
+        # já agenda a nova tentativa). Reincidir com o mesmo conteúdo é erro: o arquivo não lê.
+        log_event(
+            "ZSW-HASH-001",
+            "Timeout após %ss ao calcular SHA-256 de '%s' (%.1f MiB), tentativa %d. Em quarentena por %dh; "
             "depois disso uma nova tentativa usa um limite maior.",
             effective_timeout,
             path,
             size_mb,
+            timeout_count,
             HASH_QUARANTINE_TTL_HOURS,
+            subject=path,
+            severity="error" if timeout_count >= HASH_TIMEOUT_ERROR_AFTER else "pending",
+            attempts=timeout_count,
         )
         if cache_ref is not None:
-            set_cached_hash(abspath, HASH_TIMEOUT_QUARANTINE_MARK, cache_ref, stat, quarantined_at=time.time())
+            set_cached_hash(
+                abspath, HASH_TIMEOUT_QUARANTINE_MARK, cache_ref, stat,
+                quarantined_at=time.time(), timeout_count=timeout_count,
+            )
         return None
     except OSError as exc:
-        logging.warning("[HASH] Não foi possível calcular hash de '%s': %s", path, exc)
+        log_event("ZSW-HASH-003", "Não foi possível calcular hash de '%s': %s", path, exc, subject=path)
         return None
     finally:
         if alarm_enabled:
@@ -6768,11 +7086,13 @@ def sync_item_collections_to_drive_collection(
         )
         return True
     except Exception as exc:
-        logging.warning(
-            "[COLLECTION] Falha ao alinhar item %s à coleção do drive %s: %s",
+        log_event(
+            "ZSW-COLL-001",
+            "Falha ao alinhar item %s à coleção do drive %s: %s",
             item_key,
             drive_collection_key,
             exc,
+            subject=item_key,
         )
         return False
 
@@ -6818,7 +7138,7 @@ def _delete_empty_collection(
         return False
     status = getattr(response, 'status_code', None)
     if status != 204:
-        logging.warning("[COLLECTION] API recusou apagar a coleção %s (%s): HTTP %s", key, reason, status)
+        log_event("ZSW-COLL-002", "API recusou apagar a coleção %s (%s): HTTP %s", key, reason, status, subject=key)
         return False
     stats['collections_deleted_this_run'] = stats.get('collections_deleted_this_run', 0) + 1
     record_duplicate_action({
@@ -7190,7 +7510,7 @@ def apply_collection_folder_actions(
         key = action.get('key')
         if kind == 'conflict':
             stats['folder_sync_conflicts'] += 1
-            logging.warning("%s Conflito na coleção %s: %s.", prefix, key, action['reason'])
+            log_event("ZSW-FOLD-001", "%s Conflito na coleção %s: %s.", prefix, key, action['reason'], subject=key)
 
         elif kind == 'rename_drive_dir':
             src = _vault_dir(drive_root, action['old'])
@@ -7200,7 +7520,8 @@ def apply_collection_folder_actions(
             if os.path.exists(dst) and not _dir_has_files(dst) and _dir_has_files(src):
                 if not dry_run and not _remove_empty_tree(dst):
                     stats['folder_sync_conflicts'] += 1
-                    logging.warning("%s Destino '%s' existe e não está vazio.", prefix, action['new'])
+                    log_event("ZSW-FOLD-001", "%s Destino '%s' existe e não está vazio.", prefix, action['new'],
+                              subject=action['new'])
                     continue
             elif os.path.exists(dst):
                 if not _dir_has_files(src):
@@ -7210,9 +7531,10 @@ def apply_collection_folder_actions(
                         drive_changed = True
                 else:
                     stats['folder_sync_conflicts'] += 1
-                    logging.warning(
+                    log_event(
+                        "ZSW-FOLD-001",
                         "%s '%s' e '%s' têm conteúdo; nada foi movido. Os arquivos serão realocados um a um.",
-                        prefix, action['old'], action['new'],
+                        prefix, action['old'], action['new'], subject=f"{action['old']}>{action['new']}",
                     )
                 continue
             logging.info("%s Coleção movida/renomeada no Zotero: pasta '%s' -> '%s'.", prefix, action['old'], action['new'])
@@ -7318,8 +7640,9 @@ def reconcile_collection_folder_renames(
     if not drive_ledger_is_healthy(drive_root, ledger):
         stats['folder_sync_blocked'] = True
         stats['folder_sync_errors'] += 1
-        logging.error(
-            "[FOLDER-SYNC] Nenhuma pasta do livro-razão existe em '%s'; o drive parece desmontado. "
+        log_event(
+            "ZSW-FOLD-003",
+            "Nenhuma pasta do livro-razão existe em '%s'; o drive parece desmontado. "
             "Nenhuma ação estrutural será feita nesta execução.", drive_root,
         )
         return False
@@ -8013,6 +8336,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help='Relatório de saúde da biblioteca: somente leitura, só pela API, sem títulos',
     )
 
+    explain_parser = subparsers.add_parser(
+        'explicar',
+        help='Explica um código de erro (ZSW-AREA-NNN); sem argumento lista o catálogo',
+    )
+    explain_parser.add_argument('codigo', nargs='?')
+
+    events_parser = subparsers.add_parser(
+        'eventos',
+        help='Consulta o log estruturado de eventos por código, run e período',
+    )
+    events_parser.add_argument('--codigo', help='Filtra por código, por exemplo ZSW-HASH-001')
+    events_parser.add_argument('--run', help="Filtra por run_id, ou 'ultimo' para o run mais recente")
+    events_parser.add_argument('--dias', type=int, default=1, help='Quantos dias olhar para trás (padrão 1)')
+    events_parser.add_argument('--limite', type=int, default=50, help='Máximo de linhas (padrão 50)')
+
 
     obsidian_verify_parser = subparsers.add_parser(
         'obsidian-verify',
@@ -8240,7 +8578,7 @@ def ensure_single_instance() -> None:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         _SINGLE_INSTANCE_LOCK_FD = fd
     except BlockingIOError:
-        logging.error("[SYSTEM] Outra instância do Zotero Sync já está em execução. Abortando.")
+        log_event("ZSW-SYS-001", "Outra instância do Zotero Sync já está em execução. Abortando.")
         print("❌ Sincronização cancelada: Outra instância já está em execução.")
         raise SyncLockBusy()
     except Exception as e:
@@ -8326,7 +8664,10 @@ def run_sync_mode(notification_policy: dict | None = None):
         send_sync_progress_notification(build_first_open_sync_notification_body())
     configure_pyzotero_upload_transport()
     purge_quarantine()
+    purge_old_logs()
     _HASH_RUN_STATE["timeouts"] = 0
+    RUN.reset()
+    logging.info("[RUN] run_id=%s iniciado.", RUN.run_id)
     
     # 0. Preflight
     pf_errors = preflight_checks()
@@ -8341,7 +8682,7 @@ def run_sync_mode(notification_policy: dict | None = None):
             datetime.now(timezone.utc).isoformat(),
         )
         for e in pf_errors:
-            logging.error("[PREFLIGHT] %s", e)
+            log_event("ZSW-SYS-002", "%s", e, subject=str(e), in_stats=True)
         print("❌ Preflight falhou:")
         for e in pf_errors:
             print(f"  - {e}")
@@ -9016,7 +9357,8 @@ def run_sync_mode(notification_policy: dict | None = None):
                         stats,
                         f"Falha ao importar '{file_name}' via Zotero Desktop/WebDAV.",
                     )
-                    logging.error("[ERRO] Falha ao importar '%s' via Zotero Desktop/WebDAV.", file_name)
+                    log_event("ZSW-DESK-001", "Falha ao importar '%s' via Zotero Desktop/WebDAV.", file_name,
+                              subject=file_name, in_stats=True)
                     continue
 
                 new_key = desktop_result.get("attachmentKey")
@@ -9179,6 +9521,8 @@ def run_sync_mode(notification_policy: dict | None = None):
     total_verificados = stats['processed'] or stats['folder_checked_pdfs']
     pct_adicionados = ((stats['added'] / total_verificados) * 100) if total_verificados > 0 else 0
     pct_ignorados = ((stats['skipped'] / total_verificados) * 100) if total_verificados > 0 else 0
+    # Os eventos com código entram na contagem antes do relatório, da notificação e do código de saída.
+    apply_run_events_to_stats(stats)
     pct_erros = ((stats['errors'] / total_verificados) * 100) if total_verificados > 0 else 0
 
     tie_summary = ""
@@ -9190,6 +9534,7 @@ def run_sync_mode(notification_policy: dict | None = None):
             )
         tie_summary = "\n".join(tie_lines)
 
+    events_summary = render_run_events_summary()
     summary = f"""
 ╔════════════════════════════════════════════════════════╗
 ║           RELATÓRIO FINAL  (v2.0)                      ║
@@ -9249,7 +9594,7 @@ def run_sync_mode(notification_policy: dict | None = None):
 │ Cache web indisponíveis: {stats['web_cache_skipped_unavailable']:<19} │
 │ Cache web falhas: {stats['web_cache_errors']:<28} │
 └──────────────────────────────────────────────────────┘
-{tie_summary}
+{tie_summary}{events_summary}
 
 ✨ Processamento concluído!
 """
@@ -9310,6 +9655,13 @@ def run_open_zotero_sync_loop(interval_seconds: int) -> None:
             )
         except SyncLockBusy:
             logging.info("[WATCHER] Outro sync está em andamento; ciclo adiado em %ds.", interval_seconds)
+        except SystemExit as exc:
+            # Um sync que termina com erros sai com código 1; isso não pode matar o watcher.
+            log_event(
+                "ZSW-SYS-003",
+                "Sync terminou com código %s; o watcher continua e tenta de novo em %ds.",
+                exc.code, interval_seconds,
+            )
         else:
             first = False
         if not is_zotero_running():
@@ -9344,6 +9696,12 @@ def main(argv: List[str] | None = None) -> int:
         return 0
     if args.command == 'biblioteca-relatorio':
         run_library_health_mode()
+        return 0
+    if args.command == 'explicar':
+        run_explain_mode(args.codigo)
+        return 0
+    if args.command == 'eventos':
+        run_events_mode(args.codigo, args.run, args.dias, args.limite)
         return 0
     if args.command == 'setup-autostart':
         run_setup_autostart_mode(args.setup_args)
