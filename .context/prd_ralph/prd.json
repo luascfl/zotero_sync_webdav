@@ -450,6 +450,21 @@
         "Tests cover each scenario with fake Zotero and temporary directories; the full suite stays green.",
         "A ledger older than 14 days (ZOTERO_FOLDER_LEDGER_MAX_AGE_DAYS) is only renewed, never used to act."
       ]
+    },
+    {
+      "id": "US-024",
+      "title": "Watcher survives a busy sync lock",
+      "status": "done",
+      "dependsOn": [
+        "US-023"
+      ],
+      "description": "As the owner of the auto sync, I want the resident watcher to skip a cycle when another sync (for example the timer) holds the lock, instead of exiting and being restarted by systemd.",
+      "acceptanceCriteria": [
+        "A busy lock raises SyncLockBusy, a SystemExit with code 1, so the standalone sync command still exits with failure.",
+        "run_open_zotero_sync_loop catches SyncLockBusy, logs that the cycle was postponed and keeps looping.",
+        "The first-cycle notifications are consumed only when a sync actually ran, and the start notification is sent after the lock is acquired.",
+        "Tests cover the surviving loop, the unchanged exit code and the absence of a start notification on collision; the full suite stays green."
+      ]
     }
   ]
 }

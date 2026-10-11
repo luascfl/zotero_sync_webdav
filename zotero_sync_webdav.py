@@ -8027,6 +8027,17 @@ def preflight_checks() -> list[str]:
 
 
 
+class SyncLockBusy(SystemExit):
+    """Outra instância detém o lock do sync.
+
+    É um SystemExit com código 1 para o comando `sync` avulso continuar terminando com falha,
+    mas o laço do watcher a captura e apenas adia o ciclo em vez de encerrar o processo.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(1)
+
+
 def ensure_single_instance() -> None:
     """Garante que apenas uma instância do script rode usando fcntl lock."""
     import fcntl
@@ -8043,7 +8054,7 @@ def ensure_single_instance() -> None:
     except BlockingIOError:
         logging.error("[SYSTEM] Outra instância do Zotero Sync já está em execução. Abortando.")
         print("❌ Sincronização cancelada: Outra instância já está em execução.")
-        sys.exit(1)
+        raise SyncLockBusy()
     except Exception as e:
         logging.warning("[SYSTEM] Não foi possível criar arquivo de lock de instância: %s", e)
 
@@ -8121,9 +8132,10 @@ def preprocess_drive_duplicate_folders(target_folder: str, stats: dict) -> None:
 def run_sync_mode(notification_policy: dict | None = None):
     """Executa a sincronização observando API do Zotero, drive montado e storage local."""
     notification_policy = notification_policy or {"announce_start": False, "progress": False, "completion": True}
+    # O lock vem antes da notificação: um ciclo que não vai rodar não deve anunciar início.
+    ensure_single_instance()
     if notification_policy.get("announce_start"):
         send_sync_progress_notification(build_first_open_sync_notification_body())
-    ensure_single_instance()
     configure_pyzotero_upload_transport()
     purge_quarantine()
     
@@ -9091,17 +9103,26 @@ def is_zotero_running() -> bool:
     return False
 
 def run_open_zotero_sync_loop(interval_seconds: int) -> None:
-    """Sincroniza repetidamente enquanto o Zotero Desktop permanece aberto."""
+    """Sincroniza repetidamente enquanto o Zotero Desktop permanece aberto.
+
+    Se outro sync (por exemplo o do timer) detém o lock, o ciclo é adiado e o laço segue: o
+    watcher não pode morrer por causa de uma colisão. As notificações do primeiro ciclo só são
+    consumidas quando um sync de fato rodou.
+    """
     first = True
     while is_zotero_running():
-        run_sync_mode(
-            notification_policy={
-                "announce_start": first,
-                "progress": first,
-                "completion": first,
-            }
-        )
-        first = False
+        try:
+            run_sync_mode(
+                notification_policy={
+                    "announce_start": first,
+                    "progress": first,
+                    "completion": first,
+                }
+            )
+        except SyncLockBusy:
+            logging.info("[WATCHER] Outro sync está em andamento; ciclo adiado em %ds.", interval_seconds)
+        else:
+            first = False
         if not is_zotero_running():
             return
         time.sleep(interval_seconds)

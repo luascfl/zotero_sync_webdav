@@ -71,6 +71,34 @@ class ZoteroWatchModeTests(unittest.TestCase):
         self.assertEqual(mock_is_running.call_count, 4)
         mock_sleep.assert_called_once_with(11)
 
+    def test_loop_survives_a_busy_lock_and_keeps_the_first_cycle_notifications(self):
+        with patch.object(zsync, "is_zotero_running", side_effect=[True, True, True, True, False]):
+            with patch.object(
+                zsync, "run_sync_mode", side_effect=[zsync.SyncLockBusy(), None]
+            ) as mock_run_sync_mode:
+                with patch("time.sleep") as mock_sleep:
+                    zsync.run_open_zotero_sync_loop(7)
+
+        first_policy = mock_run_sync_mode.call_args_list[0].kwargs["notification_policy"]
+        retry_policy = mock_run_sync_mode.call_args_list[1].kwargs["notification_policy"]
+        self.assertTrue(first_policy["announce_start"])
+        self.assertTrue(retry_policy["announce_start"], "a notificação do primeiro ciclo não foi consumida")
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    def test_busy_lock_is_still_a_systemexit_with_code_1_for_the_standalone_command(self):
+        error = zsync.SyncLockBusy()
+        self.assertIsInstance(error, SystemExit)
+        self.assertEqual(error.code, 1)
+
+    def test_busy_lock_does_not_announce_the_sync_start(self):
+        with patch.object(zsync, "ensure_single_instance", side_effect=zsync.SyncLockBusy()):
+            with patch.object(zsync, "send_sync_progress_notification") as mock_notify:
+                with self.assertRaises(zsync.SyncLockBusy):
+                    zsync.run_sync_mode(notification_policy={
+                        "announce_start": True, "progress": True, "completion": True,
+                    })
+        mock_notify.assert_not_called()
+
     def test_run_zotero_open_watch_waits_for_open_then_starts_sync_loop_with_configured_interval(self):
         with patch.object(
             zsync,
