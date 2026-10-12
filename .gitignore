@@ -27,3 +27,5 @@ gcp-oauth.keys.json,
 gemini-gcloud-key.json
 gcp-oauth.keys.json
 graphify-out/
+.context/workflow/ralph/
+.context/workflow/archive/
