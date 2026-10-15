@@ -13,6 +13,13 @@ HOUR = 3600
 
 class ComputeSha256QuarantineTests(unittest.TestCase):
     def setUp(self):
+        events_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(events_dir.cleanup)
+        events_patch = mock.patch.object(zsync, "LOG_DIR", events_dir.name)
+        events_patch.start()
+        self.addCleanup(events_patch.stop)
+        zsync.RUN.reset()
+        self.addCleanup(zsync.RUN.reset)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / "test.pdf"
@@ -65,6 +72,13 @@ class ComputeSha256QuarantineTests(unittest.TestCase):
 
 class HashTimeoutScalingTests(unittest.TestCase):
     def setUp(self):
+        events_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(events_dir.cleanup)
+        events_patch = mock.patch.object(zsync, "LOG_DIR", events_dir.name)
+        events_patch.start()
+        self.addCleanup(events_patch.stop)
+        zsync.RUN.reset()
+        self.addCleanup(zsync.RUN.reset)
         zsync._HASH_RUN_STATE["timeouts"] = 0
         self.addCleanup(zsync._HASH_RUN_STATE.__setitem__, "timeouts", 0)
         patcher = mock.patch.multiple(zsync, HASH_READ_TIMEOUT_SECONDS=30, HASH_TIMEOUT_MAX_SECONDS=300)
