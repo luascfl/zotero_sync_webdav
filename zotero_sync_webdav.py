@@ -511,9 +511,11 @@ ERROR_CATALOG: dict[str, dict] = {
         "title": "Timeout ao calcular o SHA-256 de um PDF",
         "cause": "A leitura do arquivo pelo mount do rclone passou do limite. A primeira vez é pendência: "
                  "pode ser um tropeço do mount, e a leitura seguinte sai do cache do rclone. Vira erro quando "
-                 "o mesmo arquivo estoura de novo depois da quarentena.",
-        "action": "Se for a primeira vez, nada a fazer: o arquivo é tentado de novo. Se virou erro, confira o "
-                  "mount (systemctl --user status rclone-google-drive) ou aumente ZOTERO_HASH_TIMEOUT_MAX_SECONDS.",
+                 "o mesmo arquivo estoura de novo depois da quarentena. O limite dobra a cada falha do mesmo "
+                 "arquivo, até ZOTERO_HASH_TIMEOUT_MAX_SECONDS, então a repetição indica um problema real de leitura.",
+        "action": "Se for a primeira vez, nada a fazer: o arquivo é tentado de novo com mais tempo. Se virou erro, "
+                  "confira o mount (systemctl --user status rclone-google-drive) e leia o arquivo à mão com "
+                  "sha256sum para ver quanto demora.",
     },
     "ZSW-HASH-002": {
         "severity": "pending",
@@ -4949,19 +4951,35 @@ def relocate_drive_file(
         return current_path
 
 
-def hash_timeout_for_size(size_bytes: int) -> int:
-    """Limite de leitura para o hash de um arquivo: cresce com o tamanho, até um teto.
+def previous_timeout_attempts(cache: Dict[str, dict] | None, abspath: str, stat: os.stat_result) -> int:
+    """Quantas vezes este mesmo arquivo já estourou o tempo de leitura (0 se mudou ou nunca falhou).
+
+    O histórico só vale para o mesmo tamanho e a mesma data: um arquivo alterado recomeça do zero.
+    """
+    entry = (cache or {}).get(abspath) or {}
+    same_file = (
+        entry.get("size") == stat.st_size
+        and entry.get("mtime_ns") == getattr(stat, "st_mtime_ns", None)
+    )
+    return int(entry.get("timeout_count", 0) or 0) if same_file else 0
+
+
+def hash_timeout_for_size(size_bytes: int, prior_attempts: int = 0) -> int:
+    """Limite de leitura para o hash de um arquivo: cresce com o tamanho e com as falhas anteriores.
 
     Um limite fixo de 30 s derrubava PDFs de 30 a 330 MB lidos pelo rclone (cerca de 1 a 2 MB/s
-    na primeira leitura, instantânea nas seguintes pelo cache do mount). Depois de
-    HASH_TIMEOUT_BREAKER estouros no mesmo sync o mount provavelmente está ruim, e o limite
-    volta ao básico para não travar a rodada.
+    na primeira leitura, instantânea nas seguintes pelo cache do mount). Cada falha anterior do
+    mesmo arquivo dobra o limite, até o teto, porque repetir a mesma espera só repete a falha: um
+    PDF de 27 MB estourou 10 vezes seguidas em 37 s enquanto o mount, ocupado durante o sync, o
+    lia em mais que isso. Depois de HASH_TIMEOUT_BREAKER estouros no mesmo sync o mount
+    provavelmente está ruim, e o limite volta ao básico para não travar a rodada.
     """
     base = HASH_READ_TIMEOUT_SECONDS
     if base <= 0 or _HASH_RUN_STATE["timeouts"] >= HASH_TIMEOUT_BREAKER:
         return base
     needed = -(-int(size_bytes) // HASH_MIN_THROUGHPUT_BYTES_PER_SECOND)
-    return min(max(base, needed), max(base, HASH_TIMEOUT_MAX_SECONDS))
+    scaled = max(base, needed) * (2 ** min(max(prior_attempts, 0), 6))
+    return min(scaled, max(base, HASH_TIMEOUT_MAX_SECONDS))
 
 
 def compute_sha256(
@@ -4987,7 +5005,10 @@ def compute_sha256(
             logging.debug("[HASH] Cache hit para '%s'.", path)
             return cached
 
-    effective_timeout = hash_timeout_for_size(stat.st_size) if timeout_seconds is None else timeout_seconds
+    prior_attempts = previous_timeout_attempts(cache_ref, abspath, stat)
+    effective_timeout = (
+        hash_timeout_for_size(stat.st_size, prior_attempts) if timeout_seconds is None else timeout_seconds
+    )
     size_mb = stat.st_size / (1024 * 1024)
     logging.info(
         "[HASH] Calculando SHA-256 de '%s' (%.1f MiB, timeout=%ss).",
@@ -5022,13 +5043,7 @@ def compute_sha256(
         logging.info("[HASH] SHA-256 concluído para '%s' em %.1fs.", path, elapsed)
     except TimeoutError:
         _HASH_RUN_STATE["timeouts"] += 1
-        previous_entry = cache_ref.get(abspath, {}) if cache_ref is not None else {}
-        same_file = (
-            previous_entry.get("size") == stat.st_size
-            and previous_entry.get("mtime_ns") == getattr(stat, "st_mtime_ns", None)
-        )
-        # O histórico de falhas só vale para o mesmo arquivo: se o tamanho ou a data mudaram, é recomeço.
-        timeout_count = (int(previous_entry.get("timeout_count", 0) or 0) if same_file else 0) + 1
+        timeout_count = previous_timeout_attempts(cache_ref, abspath, stat) + 1
         # A primeira falha de um arquivo é pendência (pode ser um tropeço do mount, e a quarentena
         # já agenda a nova tentativa). Reincidir com o mesmo conteúdo é erro: o arquivo não lê.
         log_event(

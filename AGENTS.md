@@ -55,10 +55,10 @@ This repository contains automation scripts for a personal Linux Zotero/WebDAV w
 - Make failures explicit. A failed API call, missing mount, missing secret, failed copy, or failed rename must be logged as a failure, not presented as success.
 - Prefer pure, testable helpers for path resolution, filename normalization, cache behavior, and filesystem decisions.
 - Do not contact Zotero API in tests unless a story explicitly defines an integration test with credentials.
-- Add or update validation evidence in `.context/docs/planning_gsd/STATE.md` when a cycle changes behavior.
+- Add or update validation evidence in `.context/plans/STATE.md` when a cycle changes behavior.
 
 ## Ralph and GSD
-- PRD source: `.context/prd_ralph/prd.json`.
-- GSD plan: `.context/docs/planning_gsd/PROJECT.md`.
-- Current state: `.context/docs/planning_gsd/STATE.md`.
+- PRD source: `.context/workflow/prd.json`.
+- GSD plan: `.context/plans/PROJECT.md`.
+- Current state: `.context/plans/STATE.md`.
 - Execute one Ralph story per cycle.

@@ -5,8 +5,8 @@ Gemini is the implementation executor for closed Ralph stories in this repositor
 ## Before editing
 1. Read `AGENTS.md`.
 2. Read `.context/docs/README.md`.
-3. Read `.context/docs/planning_gsd/STATE.md`.
-4. Read `.context/prd_ralph/README.md` and `.context/prd_ralph/prd.json`.
+3. Read `.context/plans/STATE.md`.
+4. Read `.context/workflow/README.md` and `.context/workflow/prd.json`.
 5. Implement exactly one selected story.
 
 ## Constraints

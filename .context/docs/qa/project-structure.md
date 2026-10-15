@@ -13,8 +13,8 @@ The repository is currently organized as root-level Python scripts plus `.contex
 
 ## Context and workflow
 - `.context/docs/`: official technical documentation.
-- `.context/docs/planning_gsd/`: GSD project plan and state.
-- `.context/prd_ralph/`: Ralph PRD and generated overview.
+- `.context/plans/`: GSD project plan and state.
+- `.context/workflow/`: Ralph PRD and generated overview.
 - `.context/workflow/`: AI Coders Context workflow state.
 
 ## Ignored local files

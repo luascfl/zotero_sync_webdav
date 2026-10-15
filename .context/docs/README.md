@@ -18,11 +18,11 @@ This is the official project context for `zotero_sync_webdav`.
 - [Project structure](./qa/project-structure.md)
 
 ## Planning and execution
-- [GSD project plan](./planning_gsd/PROJECT.md)
-- [GSD state](./planning_gsd/STATE.md)
-- [Ralph PRD](../prd_ralph/prd.json)
-- [Ralph notes](../prd_ralph/README.md)
-- [Ralph overview](../prd_ralph/prd.overview.md)
+- [GSD project plan](../plans/PROJECT.md)
+- [GSD state](../plans/STATE.md)
+- [Ralph PRD](../workflow/prd.json)
+- [Ralph notes](../workflow/README.md)
+- [Ralph overview](../workflow/prd.overview.md)
 
 ## Current context summary
 The repository is a small Python automation codebase for a Linux Zotero/WebDAV setup. The primary script is `zotero_sync_webdav.py`; the other scripts support diagnosis, duplicate cleanup, and Obsidian folder mirroring. The first active milestone is hardening the main synchronizer without turning the helper scripts into independent products.

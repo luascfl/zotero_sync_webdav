@@ -84,6 +84,47 @@ class HashTimeoutScalingTests(unittest.TestCase):
         zsync._HASH_RUN_STATE["timeouts"] = zsync.HASH_TIMEOUT_BREAKER
         self.assertEqual(zsync.hash_timeout_for_size(334 * 1024 * 1024), 30)
 
+    def test_each_failure_of_the_same_file_doubles_the_limit_up_to_the_cap(self):
+        size = int(27.4 * 1024 * 1024)
+        self.assertEqual(
+            [zsync.hash_timeout_for_size(size, attempts) for attempts in range(6)],
+            [37, 74, 148, 296, 300, 300],
+        )
+
+    def test_the_breaker_still_overrides_the_doubling(self):
+        zsync._HASH_RUN_STATE["timeouts"] = zsync.HASH_TIMEOUT_BREAKER
+        self.assertEqual(zsync.hash_timeout_for_size(27 * 1024 * 1024, 5), 30)
+
+    def test_attempt_history_only_counts_for_the_same_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "a.pdf"
+            path.write_bytes(b"x")
+            abspath = zsync._normalize_cache_path(str(path))
+            cache = {}
+            zsync.set_cached_hash(str(path), zsync.HASH_TIMEOUT_QUARANTINE_MARK, cache, path.stat(),
+                                  quarantined_at=time.time(), timeout_count=4)
+            self.assertEqual(zsync.previous_timeout_attempts(cache, abspath, path.stat()), 4)
+            path.write_bytes(b"conteudo diferente")
+            self.assertEqual(zsync.previous_timeout_attempts(cache, abspath, path.stat()), 0)
+            self.assertEqual(zsync.previous_timeout_attempts(None, abspath, path.stat()), 0)
+
+    def test_a_retry_after_the_quarantine_really_waits_longer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "a.pdf"
+            path.write_bytes(b"x")
+            cache = {}
+            alarms = []
+            with mock.patch("signal.alarm", side_effect=alarms.append), \
+                    mock.patch.object(zsync.hashlib, "sha256", side_effect=TimeoutError), \
+                    mock.patch.object(zsync, "log_event"):
+                zsync.compute_sha256(str(path), cache=cache)
+                cache[zsync._normalize_cache_path(str(path))]["quarantined_at"] -= (
+                    zsync.HASH_QUARANTINE_TTL_HOURS + 1) * 3600
+                zsync._HASH_RUN_STATE["timeouts"] = 0
+                zsync.compute_sha256(str(path), cache=cache)
+            started = [value for value in alarms if value]
+            self.assertEqual(started, [30, 60])
+
     def test_disabled_timeout_stays_disabled(self):
         with mock.patch.object(zsync, "HASH_READ_TIMEOUT_SECONDS", 0):
             self.assertEqual(zsync.hash_timeout_for_size(334 * 1024 * 1024), 0)

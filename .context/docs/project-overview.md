@@ -25,7 +25,7 @@ status: filled
 ## Code organization
 - Root Python scripts hold all runtime behavior.
 - `.context/docs/` holds project documentation and planning context.
-- `.context/prd_ralph/` holds Ralph PRD state.
+- `.context/workflow/` holds Ralph PRD state.
 - `.context/workflow/` holds PREVC workflow status.
 - `.ralph/` may be created by Ralph when a build loop runs.
 

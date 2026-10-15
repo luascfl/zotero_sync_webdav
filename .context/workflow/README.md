@@ -1,6 +1,6 @@
 # Ralph PRD context
 
-Canonical PRD path: `.context/prd_ralph/prd.json`.
+Canonical PRD path: `.context/workflow/prd.json`.
 
 This PRD treats the repository as a Linux automation script project, not as a set of separate products. Ralph should execute one story per cycle. The current priority is hardening the main Zotero/WebDAV synchronizer while preserving unattended operation.
 
@@ -15,7 +15,7 @@ This PRD treats the repository as a Linux automation script project, not as a se
 Use:
 
 ```bash
-ralph build 1 --prd .context/prd_ralph/prd.json
+ralph build 1 --prd .context/workflow/prd.json
 ```
 
-If Gemini execution is handled outside Ralph, use the prompt recorded in `.context/docs/planning_gsd/STATE.md` for the selected story.
+If Gemini execution is handled outside Ralph, use the prompt recorded in `.context/plans/STATE.md` for the selected story.

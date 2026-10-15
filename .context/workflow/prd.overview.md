@@ -1,7 +1,7 @@
 # PRD Overview: Zotero WebDAV sync hardening
 
-- File: .context/prd_ralph/prd.json
-- Stories: 28 total (1 open, 0 in_progress, 27 done)
+- File: .context/workflow/prd.json
+- Stories: 29 total (1 open, 0 in_progress, 28 done)
 
 ## Quality Gates
 - python3 -m py_compile zotero_sync_webdav.py zotero_mirror_collections_to_obsidian.py
@@ -36,3 +36,4 @@
 - [done] US-026: Hash timeout quarantine expires and scales with file size (depends on: US-025)
 - [done] US-027: Isolate the test suite from the real environment (depends on: US-026)
 - [done] US-028: Unified coded event log with error codes, run ids and pending outcomes (depends on: US-027)
+- [done] US-029: Hash timeout doubles after each failure of the same file (depends on: US-028)

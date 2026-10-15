@@ -531,6 +531,21 @@
         "A sync that exits with errors no longer kills the watcher loop.",
         "Tests cover each rule, mutations were checked, and a real full sync ran."
       ]
+    },
+    {
+      "id": "US-029",
+      "title": "Hash timeout doubles after each failure of the same file",
+      "status": "done",
+      "dependsOn": [
+        "US-028"
+      ],
+      "description": "As the owner, I want a retry of a file that timed out to wait longer than the failed attempt, as the log already promised, so one slow file does not fail every sync.",
+      "acceptanceCriteria": [
+        "hash_timeout_for_size(size, prior_attempts) doubles the limit for each earlier failure of the same unchanged file, capped by ZOTERO_HASH_TIMEOUT_MAX_SECONDS; the circuit breaker still falls back to the base limit.",
+        "previous_timeout_attempts counts failures only for the same size and mtime.",
+        "compute_sha256 passes the stored attempt count to the limit; a test asserts the second attempt really arms a longer alarm.",
+        "The real stuck file hashes after the fix and its hash matches the Zotero storage copy."
+      ]
     }
   ]
 }

@@ -119,4 +119,4 @@ Sem os secrets, o workflow apenas registra no resumo que eles faltam e termina s
 
 ## Contexto do projeto
 
-A documentação técnica fica em `.context/docs/`, o plano em `.context/docs/planning_gsd/` e as histórias em `.context/prd_ralph/prd.json`.
+A documentação técnica fica em `.context/docs/`, o plano em `.context/plans/` e as histórias em `.context/workflow/prd.json`.

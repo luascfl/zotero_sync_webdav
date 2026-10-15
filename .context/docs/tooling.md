@@ -29,14 +29,14 @@ The project is intentionally lightweight. Tooling should improve reliability wit
   ```
 - Use Ralph with the PRD path:
   ```bash
-  ralph build 1 --prd .context/prd_ralph/prd.json
+  ralph build 1 --prd .context/workflow/prd.json
   ```
 
 ## Configuration files
 - `.env`: local project configuration, ignored by Git.
 - `~/.config/zotero_sync_webdav/zotero_sync.env`: service-level configuration path used by scripts.
-- `.context/prd_ralph/prd.json`: Ralph story source.
-- `.context/docs/planning_gsd/STATE.md`: current milestone and validation evidence.
+- `.context/workflow/prd.json`: Ralph story source.
+- `.context/plans/STATE.md`: current milestone and validation evidence.
 
 ## Productivity tips
 - Run the diagnostic script before cleanup or after unexpected sync behavior.

@@ -60,7 +60,7 @@ Use the GSD plus Ralph workflow for changes. GSD defines milestones and dependen
 - Prefer adding tests around pure helpers and temporary directories before changing rename, copy, cache, or hash behavior.
 - Keep automation as the default for the main synchronizer.
 - Ensure failures are truthful in logs, exit behavior, and final reports.
-- Update `.context/docs/planning_gsd/STATE.md` with validation evidence after each cycle.
+- Update `.context/plans/STATE.md` with validation evidence after each cycle.
 
 ## Context update rule
 When behavior changes, update the relevant docs under `.context/docs/`, the GSD state file, and the PRD story status through Ralph rather than creating an external backlog.
